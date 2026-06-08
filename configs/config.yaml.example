@@ -1,0 +1,73 @@
+# ============================================================
+# AegisProbe Configuration
+# Copy this file to configs/config.yaml and set secrets through
+# environment variables or a local .env file.
+# ============================================================
+
+provider:
+  type: openai-compatible
+  baseURL: https://api.deepseek.com
+  apiKeyEnv: DEEPSEEK_API_KEY
+  model: deepseek-v4-pro
+  fastModel: deepseek-v4-flash
+  timeoutMs: 300000
+  maxTokens: 16000
+  fastMaxTokens: 3000
+  maxRetries: 3
+  retryDelayMs: 2000
+
+agent:
+  defaultMode: safe
+  requireShellApproval: true
+  shell: auto
+
+storage:
+  sqlitePath: ./data/aegisprobe.sqlite
+
+policy:
+  blockDangerousCommands: true
+
+skills:
+  enabled: true
+  roots:
+    - ../skills
+    - ../../skills
+  includeYaml: true
+  includeMarkdown: true
+  maxDepth: 6
+  maxSkillBytes: 80000
+  excludeDirs:
+    - _projects
+    - node_modules
+    - .git
+    - dist
+    - build
+
+dicts:
+  enabled: false
+  roots: []
+  passwordDict: passwordDict/top3000.txt
+  usernameDict: userNameDict/top500.txt
+  directoryDict: directoryDicts/top7000.txt
+  subdomainDict: subdomainDicts/main.txt
+  apiDict: apiDict/api.txt
+
+fofa:
+  enabled: false
+  keyEnv: FOFA_KEY
+  baseUrl: https://fofa.info/api/v1
+  maxResults: 200
+
+mcp:
+  enabled: false
+  servers:
+    - name: playwright
+      command: node
+      args:
+        - "./node_modules/@playwright/mcp/cli.js"
+        - "--headless"
+        - "--browser=chromium"
+        - "--isolated"
+        - "--no-sandbox"
+        - "--port"
+        - "3200"

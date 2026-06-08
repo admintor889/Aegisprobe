@@ -1,0 +1,36 @@
+{
+  "name": "aegis-probe",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "pnpm -r build",
+    "dev": "pnpm --filter @aegisprobe/cli dev",
+    "lab:smoke": "node scripts/agent-lab-smoke.mjs",
+    "lab:smoke:s2-045": "node scripts/agent-lab-smoke.mjs --case vulhub-struts2-s2-045",
+    "lab:smoke:s2-045:proof": "node scripts/agent-lab-smoke.mjs --case vulhub-struts2-s2-045 --active-proof",
+    "lab:smoke:local-multirole": "node scripts/agent-lab-smoke.mjs --case local-multirole --start-target --active-proof --decision-iterations 0 --max-pages 3",
+    "lab:vulhub:s2-045": "powershell -ExecutionPolicy Bypass -File .\\scripts\\test-vulhub-batch.ps1 -Root labs\\targets\\vulhub\\struts2\\s2-045 -BatchSize 1 -MaxTargets 1 -UseSmokeHarness -SmokeActiveProof",
+    "lab:vulhub:flask-ssti": "powershell -ExecutionPolicy Bypass -File .\\scripts\\test-vulhub-batch.ps1 -Root labs\\targets\\vulhub\\flask\\ssti -BatchSize 1 -MaxTargets 1 -UseSmokeHarness -SmokeActiveProof",
+    "lab:vulhub:spring-22978": "powershell -ExecutionPolicy Bypass -File .\\scripts\\test-vulhub-batch.ps1 -Root labs\\targets\\vulhub\\spring\\CVE-2022-22978 -BatchSize 1 -MaxTargets 1 -UseSmokeHarness -SmokeActiveProof",
+    "lab:vulhub:apisix-45232": "powershell -ExecutionPolicy Bypass -File .\\scripts\\test-vulhub-batch.ps1 -Root labs\\targets\\vulhub\\apisix\\CVE-2021-45232 -BatchSize 1 -MaxTargets 1 -UseSmokeHarness -SmokeActiveProof -HttpReadyTimeoutSeconds 90",
+    "lab:vulhub:matrix": "powershell -ExecutionPolicy Bypass -File .\\scripts\\run-lab-smoke-matrix.ps1 -SmokeActiveProof -AllowPull",
+    "webui": "powershell -ExecutionPolicy Bypass -File .\\tools\\start-webui.ps1",
+    "lint": "pnpm -r lint",
+    "test": "pnpm -r test",
+    "typecheck": "pnpm -r typecheck"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.29",
+    "playwright": "^1.60.0",
+    "typescript": "^5.8.3",
+    "vitest": "^3.1.4"
+  },
+  "engines": {
+    "node": ">=22.14.0",
+    "pnpm": ">=10.0.0"
+  },
+  "dependencies": {
+    "@playwright/mcp": "^0.0.75"
+  }
+}

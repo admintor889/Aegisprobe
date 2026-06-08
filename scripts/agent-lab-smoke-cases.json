@@ -1,0 +1,556 @@
+{
+  "cases": [
+    {
+      "id": "vulhub-struts2-s2-045",
+      "name": "Vulhub Apache Struts2 S2-045 local smoke",
+      "labRoot": "labs/targets/vulhub/struts2/s2-045",
+      "labPathHints": [
+        "s2-045",
+        "struts2/s2-045",
+        "struts2\\s2-045"
+      ],
+      "target": {
+        "defaultUrl": "http://127.0.0.1:8080/"
+      },
+      "expect": {
+        "auth": {
+          "login": "not_observed",
+          "authState": "unknown",
+          "authEndpointsEmpty": true
+        },
+        "normalizedApiIncludes": [
+          {
+            "method": "POST",
+            "pathTemplate": "/doUpload.action",
+            "absentRiskSignals": [
+              "auth-surface"
+            ]
+          }
+        ],
+        "queueBeforeFirstFallbackFor": "authz-plan",
+        "queueAfterAbsentTitles": [
+          "Collect authenticated roles before business-impact testing"
+        ],
+        "control": {
+          "stageIn": [
+            "ready_for_business_planning",
+            "needs_auth_contexts",
+            "ready_for_validation_review"
+          ],
+          "minNormalizedApiEndpoints": 1,
+          "decisionGuardIncludes": [
+            "Prefer normalized API routes"
+          ]
+        },
+        "operatingPicture": {
+          "minEndpointMap": 1,
+          "decisionFrameIncludes": [
+            "not from a fixed phase list"
+          ],
+          "blockedIncludes": [
+            "Cross-role"
+          ],
+          "allowedActionIncludes": [
+            "normalized routes"
+          ]
+        }
+      },
+      "safeProof": {
+        "kind": "responseHeader",
+        "activeApprovalRequired": true,
+        "method": "POST",
+        "path": "/doUpload.action",
+        "headers": {
+          "Content-Type": "%{(#_='multipart/form-data').(#dm=@ognl.OgnlContext@DEFAULT_MEMBER_ACCESS).(#_memberAccess?(#_memberAccess=#dm):((#container=#context['com.opensymphony.xwork2.ActionContext.container']).(#ognlUtil=#container.getInstance(@com.opensymphony.xwork2.ognl.OgnlUtil@class)).(#ognlUtil.getExcludedPackageNames().clear()).(#ognlUtil.getExcludedClasses().clear()).(#context.setMemberAccess(#dm)))).(@org.apache.struts2.ServletActionContext@getResponse().addHeader('X-AegisProbe-Proof','vulhub-54289'))}"
+        },
+        "expectHeader": {
+          "name": "X-AegisProbe-Proof",
+          "value": "vulhub-54289"
+        },
+        "finding": {
+          "title": "Lab proof validated: Apache Struts2 S2-045 OGNL expression execution",
+          "severity": "critical",
+          "description": "A scoped local-lab proof caused the application to return a controlled response header through OGNL expression evaluation. The proof did not read files, write files, open a shell, or execute an OS command.",
+          "remediation": "Upgrade Apache Struts2 to a fixed release and remove vulnerable file upload interceptor handling."
+        }
+      }
+    },
+    {
+      "id": "vulhub-flask-ssti",
+      "name": "Vulhub Flask Jinja2 SSTI local smoke",
+      "labRoot": "labs/targets/vulhub/flask/ssti",
+      "labPathHints": [
+        "ssti",
+        "flask/ssti",
+        "flask\\ssti"
+      ],
+      "target": {
+        "defaultUrl": "http://127.0.0.1:8000/",
+        "preferredPorts": [
+          8000
+        ],
+        "seedPaths": [
+          "/?name=aegisprobe"
+        ]
+      },
+      "expect": {
+        "auth": {
+          "login": "not_observed"
+        },
+        "normalizedApiIncludes": [
+          {
+            "method": "GET",
+            "pathTemplate": "/"
+          }
+        ],
+        "control": {
+          "stageIn": [
+            "ready_for_business_planning",
+            "passive_mapping_only"
+          ],
+          "minNormalizedApiEndpoints": 1,
+          "minRouteFrontier": 1,
+          "decisionGuardIncludes": [
+            "Do not run endpoint/payload testing without endpoint and parameter/body evidence"
+          ]
+        },
+        "operatingPicture": {
+          "minEndpointMap": 1,
+          "decisionFrameIncludes": [
+            "not from a fixed phase list"
+          ],
+          "blockedIncludes": [
+            "Cross-role"
+          ],
+          "allowedActionIncludes": [
+            "normalized routes"
+          ]
+        }
+      },
+      "safeProof": {
+        "kind": "responseStatusComparison",
+        "activeApprovalRequired": true,
+        "control": {
+          "method": "GET",
+          "path": "/?name=aegisprobe"
+        },
+        "candidate": {
+          "method": "GET",
+          "path": "/?name=%7B%7B233*233%7D%7D"
+        },
+        "expect": {
+          "controlStatus": 200,
+          "candidateStatus": 200,
+          "candidateBodyContains": "54289"
+        },
+        "finding": {
+          "title": "Lab proof validated: Flask Jinja2 server-side template expression evaluation",
+          "severity": "high",
+          "description": "A scoped local-lab proof showed that a benign arithmetic template expression was evaluated by the Flask/Jinja2 response. The proof did not read files, write files, import modules, execute commands, or mutate server state.",
+          "remediation": "Avoid rendering user-controlled strings as templates; pass user input only as escaped template variables and enable appropriate template sandboxing where applicable."
+        }
+      }
+    },
+    {
+      "id": "vulhub-spring-cve-2022-22978",
+      "name": "Vulhub Spring Security CVE-2022-22978 authorization bypass smoke",
+      "labRoot": "labs/targets/vulhub/spring/CVE-2022-22978",
+      "labPathHints": [
+        "CVE-2022-22978",
+        "spring/CVE-2022-22978",
+        "spring\\CVE-2022-22978"
+      ],
+      "target": {
+        "defaultUrl": "http://127.0.0.1:8080/",
+        "seedPaths": [
+          "/admin"
+        ]
+      },
+      "expect": {
+        "auth": {
+          "authState": "anonymous"
+        },
+        "pagesVisitedIncludePaths": [
+          "/admin"
+        ],
+        "queueAfterAbsentTitles": [
+          "Collect authenticated roles before business-impact testing"
+        ],
+        "control": {
+          "stageIn": [
+            "needs_auth_contexts",
+            "ready_for_business_planning",
+            "ready_for_validation_review"
+          ],
+          "minNormalizedApiEndpoints": 1,
+          "decisionGuardIncludes": [
+            "Prefer normalized API routes"
+          ]
+        },
+        "operatingPicture": {
+          "minEndpointMap": 1,
+          "decisionFrameIncludes": [
+            "not from a fixed phase list"
+          ],
+          "blockedIncludes": [
+            "Cross-role"
+          ],
+          "allowedActionIncludes": [
+            "normalized routes"
+          ]
+        }
+      },
+      "safeProof": {
+        "kind": "responseStatusComparison",
+        "activeApprovalRequired": true,
+        "control": {
+          "method": "GET",
+          "path": "/admin"
+        },
+        "candidate": {
+          "method": "GET",
+          "path": "/admin/%0atest"
+        },
+        "expect": {
+          "controlStatus": 404,
+          "candidateStatus": 200,
+          "candidateBodyContains": "Congratulations, you are an admin!"
+        },
+        "finding": {
+          "title": "Lab proof validated: Spring Security authorization bypass",
+          "severity": "high",
+          "description": "A scoped local-lab proof showed that an unauthenticated request to the protected admin path is denied, while a newline path variant reaches the protected resource. The proof only compared HTTP responses and did not modify server state.",
+          "remediation": "Upgrade Spring Security to a fixed release and avoid RegexRequestMatcher patterns that can be bypassed by encoded newline path variants."
+        }
+      }
+    },
+    {
+      "id": "vulhub-apisix-cve-2021-45232",
+      "name": "Vulhub Apache APISIX Dashboard CVE-2021-45232 unauthenticated export API smoke",
+      "labRoot": "labs/targets/vulhub/apisix/CVE-2021-45232",
+      "labPathHints": [
+        "CVE-2021-45232",
+        "apisix/CVE-2021-45232",
+        "apisix\\CVE-2021-45232"
+      ],
+      "target": {
+        "defaultUrl": "http://127.0.0.1:9000/",
+        "preferredPorts": [
+          9000
+        ],
+        "seedPaths": [
+          "/apisix/admin/migrate/export"
+        ]
+      },
+      "expect": {
+        "auth": {
+          "login": "present"
+        },
+        "pagesVisitedIncludePaths": [
+          "/apisix/admin/migrate/export"
+        ],
+        "normalizedApiIncludes": [
+          {
+            "method": "GET",
+            "pathTemplate": "/apisix/admin/migrate/export"
+          }
+        ],
+        "queueAfterAbsentTitles": [
+          "Collect authenticated roles before business-impact testing"
+        ],
+        "control": {
+          "stageIn": [
+            "needs_auth_contexts",
+            "ready_for_business_planning",
+            "ready_for_validation_review"
+          ],
+          "minNormalizedApiEndpoints": 1,
+          "decisionGuardIncludes": [
+            "Prefer normalized API routes"
+          ]
+        },
+        "operatingPicture": {
+          "minEndpointMap": 1,
+          "decisionFrameIncludes": [
+            "not from a fixed phase list"
+          ],
+          "blockedIncludes": [
+            "Cross-role"
+          ],
+          "allowedActionIncludes": [
+            "normalized routes"
+          ]
+        }
+      },
+      "safeProof": {
+        "kind": "responseStatusComparison",
+        "activeApprovalRequired": true,
+        "control": {
+          "method": "GET",
+          "path": "/"
+        },
+        "candidate": {
+          "method": "GET",
+          "path": "/apisix/admin/migrate/export"
+        },
+        "expect": {
+          "controlStatus": 200,
+          "candidateStatus": 200,
+          "candidateBodyContains": "Routes"
+        },
+        "finding": {
+          "title": "Lab proof validated: APISIX Dashboard unauthenticated configuration export",
+          "severity": "high",
+          "description": "A scoped local-lab proof showed that the APISIX Dashboard migrate export API returns gateway configuration without authentication. The proof only read the export endpoint and did not import configuration, create routes, or trigger gateway execution.",
+          "remediation": "Upgrade APISIX Dashboard to a fixed release and ensure all management APIs are consistently protected by authentication middleware."
+        }
+      }
+    },
+    {
+      "id": "vulhub-joomla-cve-2023-23752",
+      "name": "Vulhub Joomla CVE-2023-23752 unauthenticated webservice API smoke",
+      "labRoot": "labs/targets/vulhub/joomla/CVE-2023-23752",
+      "labPathHints": [
+        "CVE-2023-23752",
+        "joomla/CVE-2023-23752",
+        "joomla\\CVE-2023-23752"
+      ],
+      "target": {
+        "defaultUrl": "http://127.0.0.1:8080/",
+        "preferredPorts": [
+          8080
+        ],
+        "seedPaths": [
+          "/api/index.php/v1/config/application?public=true",
+          "/api/index.php/v1/users?public=true"
+        ]
+      },
+      "expect": {
+        "auth": {
+          "login": "not_observed"
+        },
+        "normalizedApiIncludes": [
+          {
+            "method": "GET",
+            "pathTemplate": "/api/index.php/v1/users"
+          }
+        ],
+        "control": {
+          "stageIn": [
+            "needs_auth_contexts",
+            "ready_for_business_planning",
+            "ready_for_validation_review"
+          ],
+          "minNormalizedApiEndpoints": 2,
+          "minRouteFrontier": 2,
+          "decisionGuardIncludes": [
+            "Prefer normalized API routes"
+          ]
+        },
+        "operatingPicture": {
+          "minEndpointMap": 2,
+          "endpointIncludes": [
+            {
+              "method": "GET",
+              "pathTemplate": "/api/index.php/v1/config/application",
+              "queryParams": [
+                "public"
+              ]
+            },
+            {
+              "method": "GET",
+              "pathTemplate": "/api/index.php/v1/users",
+              "queryParams": [
+                "public"
+              ]
+            }
+          ],
+          "decisionFrameIncludes": [
+            "not from a fixed phase list"
+          ],
+          "blockedIncludes": [
+            "Cross-role"
+          ],
+          "allowedActionIncludes": [
+            "normalized routes"
+          ]
+        },
+        "redaction": {
+          "noHighEntropyParamHints": true
+        }
+      },
+      "safeProof": {
+        "kind": "responseStatusComparison",
+        "activeApprovalRequired": true,
+        "control": {
+          "method": "GET",
+          "path": "/api/index.php/v1/config/application"
+        },
+        "candidate": {
+          "method": "GET",
+          "path": "/api/index.php/v1/config/application?public=true"
+        },
+        "expect": {
+          "candidateStatus": 200,
+          "candidateBodyContains": "dbtype"
+        },
+        "finding": {
+          "title": "Lab proof validated: Joomla unauthenticated webservice configuration disclosure",
+          "severity": "high",
+          "description": "A scoped local-lab proof showed that adding the documented public=true query parameter exposes Joomla webservice configuration data without authentication. The proof only compared HTTP responses and did not submit forms, modify state, read local files, or execute commands.",
+          "remediation": "Upgrade Joomla to a fixed release and ensure webservice endpoints enforce authentication and authorization consistently before returning configuration or user data."
+        }
+      }
+    },
+    {
+      "id": "local-multirole",
+      "name": "Local multi-role web app — authorization smoke (BOLA/BFLA/tenant isolation)",
+      "labRoot": "labs/targets/local-multirole-app",
+      "labPathHints": [
+        "local-multirole-app"
+      ],
+      "target": {
+        "defaultUrl": "http://127.0.0.1:3100/"
+      },
+      "start": {
+        "command": "node",
+        "args": [
+          "server.js"
+        ],
+        "cwd": "labs/targets/local-multirole-app",
+        "readyUrl": "http://127.0.0.1:3100/",
+        "timeoutMs": 15000
+      },
+      "expect": {
+        "auth": {
+          "login": "present",
+          "authState": "anonymous"
+        },
+        "pagesVisitedIncludePaths": [
+          "/",
+          "/login"
+        ],
+        "normalizedApiIncludes": [
+          {
+            "method": "GET",
+            "pathTemplate": "/api/me"
+          },
+          {
+            "method": "GET",
+            "pathTemplate": "/api/orders/{id}"
+          },
+          {
+            "method": "GET",
+            "pathTemplate": "/api/admin/users/{id}"
+          }
+        ],
+        "queueAfterAbsentTitles": [
+          "Register one additional approved role, user, or tenant"
+        ],
+        "control": {
+          "stageIn": [
+            "needs_auth_contexts",
+            "ready_for_authz_compare",
+            "ready_for_business_planning",
+            "ready_for_validation_review"
+          ],
+          "minNormalizedApiEndpoints": 3,
+          "minRouteFrontier": 2,
+          "decisionGuardIncludes": [
+            "Prefer normalized API routes",
+            "Do not run endpoint/payload testing without endpoint and parameter/body evidence"
+          ]
+        },
+        "operatingPicture": {
+          "minEndpointMap": 3,
+          "decisionFrameIncludes": [
+            "not from a fixed phase list"
+          ],
+          "beforeBlockedIncludes": [
+            "Cross-role"
+          ],
+          "allowedActionIncludes": [
+            "normalized routes"
+          ],
+          "authNextEvidenceIncludes": [
+            "Run read-only"
+          ],
+          "beforeAuthNextEvidenceIncludes": [
+            "Register"
+          ]
+        },
+        "redaction": {
+          "noHighEntropyParamHints": true
+        },
+        "expertSnapshotContains": [
+          "Access exposure map",
+          "Payload affordances",
+          "/api/admin/users/{id}"
+        ],
+        "performance": {
+          "maxReconMs": 60000,
+          "maxTotalMs": 90000
+        }
+      },
+      "safeProof": {
+        "kind": "multiRoleAuthz",
+        "description": "Register two auth contexts, login via JWT, and verify read-only cross-role comparison produces candidate finding. With expected policy, finding confidence upgrades to validated.",
+        "authContexts": [
+          {
+            "name": "alice",
+            "role": "customer",
+            "tenant": "tenant-a",
+            "username": "alice"
+          },
+          {
+            "name": "bob",
+            "role": "customer",
+            "tenant": "tenant-b",
+            "username": "bob"
+          }
+        ],
+        "expectedPolicy": {
+          "id": "multi-role-default",
+          "name": "Multi-role expected authorization",
+          "description": "Expected policy for local multi-role app: customers can access own orders but not admin routes",
+          "subjects": [
+            { "id": "subj-customer", "name": "customer", "role": "customer" },
+            { "id": "subj-admin", "name": "admin", "role": "admin" }
+          ],
+          "rules": [
+            {
+              "id": "rule-deny-admin",
+              "description": "Customers should not access admin user endpoints",
+              "subjectId": "subj-customer",
+              "route": "/api/admin/",
+              "method": "GET",
+              "action": "deny",
+              "confidence": "high"
+            },
+            {
+              "id": "rule-allow-orders-own",
+              "description": "Customers should access their own order endpoints",
+              "subjectId": "subj-customer",
+              "route": "/api/orders/",
+              "method": "GET",
+              "action": "allow",
+              "confidence": "high"
+            }
+          ],
+          "createdAt": "2025-01-01T00:00:00.000Z"
+        },
+        "expect": {
+          "queueAfterTwoContexts": "Run read-only cross-role authorization comparison",
+          "findingWithoutPolicy": {
+            "confidence": "low",
+            "severity": "medium"
+          },
+          "findingWithPolicy": {
+            "confidence": "high",
+            "severity": "high"
+          }
+        }
+      }
+    }
+  ]
+}

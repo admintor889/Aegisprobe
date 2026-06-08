@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>aegisprobe | 渗透工作台</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app-shell">
+  <aside class="left-rail">
+    <div class="sidebar-head panel-card">
+      <div class="workspace-tab">
+        <span class="tab-dot"></span>
+        <span id="workspace-name" class="workspace-tab-name">agent-pentest-assistant</span>
+      </div>
+      <div class="sidebar-head-actions">
+        <button id="btn-new-session" class="primary-button" type="button">+ 新会话</button>
+      </div>
+    </div>
+
+    <section class="sidebar-panel panel-card">
+      <div class="workspace-picker-row">
+        <div class="workspace-pill">
+          <span class="workspace-pill-icon">DIR</span>
+          <div class="workspace-pill-copy">
+            <span class="workspace-pill-label">工作目录</span>
+            <strong id="workspace-short-name">agent-pentest-assistant</strong>
+          </div>
+        </div>
+        <button id="btn-pick-workspace" class="ghost-button" type="button">切换</button>
+      </div>
+      <input id="workspace-picker" type="file" webkitdirectory directory multiple hidden>
+      <div class="workspace-path-row">
+        <span class="workspace-path-label">路径</span>
+        <span id="workspace-path" class="workspace-path">正在读取当前工作区...</span>
+      </div>
+      <label class="search-box" for="session-search">
+        <span class="search-icon">Q</span>
+        <input id="session-search" type="text" placeholder="搜索会话...">
+        <span class="search-shortcut">Ctrl K</span>
+      </label>
+    </section>
+
+    <section class="sidebar-panel panel-card sidebar-list-panel">
+      <div class="section-head compact">
+        <div>
+          <p class="section-kicker">近期</p>
+          <h2>会话</h2>
+        </div>
+        <span id="session-count" class="count-badge">0</span>
+      </div>
+      <div id="session-list" class="session-list">
+        <div class="empty-state">暂无会话</div>
+      </div>
+    </section>
+
+    <section class="sidebar-panel panel-card quick-panel">
+      <div class="section-head compact">
+        <span>
+          <p class="section-kicker">快速入口</p>
+          <h2>CVE 库</h2>
+        </span>
+      </div>
+      <a class="quick-link compact-link" href="https://nvd.nist.gov/vuln/search" target="_blank" rel="noreferrer">
+        <span class="quick-link-icon">CVE</span>
+        <span>
+          <strong>官方漏洞检索</strong>
+          <small>打开 NVD 搜索页</small>
+        </span>
+      </a>
+    </section>
+  </aside>
+
+  <main class="center-stage">
+    <section class="chat-shell panel-card">
+      <header class="chatbar">
+        <div class="chatbar-main">
+          <p class="section-kicker">Agent Console</p>
+          <h2 id="chat-title" class="topbar-title">新对话</h2>
+        </div>
+      </header>
+
+      <div class="chat-status-row">
+        <div class="topbar-meta">
+          <span id="mode-badge" class="meta-pill">chat</span>
+          <span id="session-badge" class="meta-pill meta-pill-muted">未连接</span>
+          <span id="ws-status" class="meta-pill meta-pill-muted">WS 断开</span>
+          <span id="status-inline" class="meta-pill meta-pill-muted">就绪</span>
+        </div>
+      </div>
+      <div id="agent-status-bar" class="agent-status-bar">
+        <span id="agent-status-icon" class="agent-status-icon idle">●</span>
+        <span id="agent-status-label" class="agent-status-label">就绪</span>
+        <span id="agent-status-detail" class="agent-status-detail"></span>
+      </div>
+      <section id="chat-messages" class="conversation">
+        <div class="welcome-card centered">
+          <div class="welcome-badge">aegisprobe</div>
+          <div>
+            <h3>输入自然语言任务</h3>
+            <p>例如：先做资产识别，再判断是否存在可利用漏洞。</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="composer">
+        <textarea id="chat-input" rows="1" placeholder="输入自然语言任务..."></textarea>
+        <div class="composer-toolbar">
+          <div></div>
+          <div class="composer-right">
+            <a id="btn-download-report" class="ghost-button" target="_blank" style="display:none">下载报告</a>
+            <div class="model-pill">
+              <span>模型</span>
+              <strong id="model-name">deepseek-v4-pro</strong>
+            </div>
+            <button id="btn-send" class="primary-button" type="button">发送</button>
+          </div>
+        </div>
+        <div class="status-line">
+          <span id="status-indicator" class="status-dot idle"></span>
+          <span id="status-text">就绪</span>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <aside class="right-rail">
+    <section class="ops-card panel-card">
+      <div class="section-head">
+        <div>
+          <p class="section-kicker">Execution Flow</p>
+          <h2>当前渗透流程</h2>
+        </div>
+        <span id="phase-badge" class="meta-pill">idle</span>
+      </div>
+      <div class="phase-summary">
+        <p id="phase-name" class="phase-name">等待启动</p>
+        <p id="phase-step" class="phase-step">右侧会根据 agent 当前任务实时刷新。</p>
+      </div>
+      <div id="web-control-plane" class="web-control-plane"></div>
+      <div id="authz-matrix" class="authz-matrix"></div>
+      <div id="workflow-steps" class="workflow-steps"></div>
+      <div id="finding-list" class="finding-list"></div>
+    </section>
+
+    <section class="ops-card panel-card terminal-card">
+      <div class="section-head">
+        <div>
+          <p class="section-kicker">Runtime</p>
+          <h2>终端</h2>
+        </div>
+      </div>
+      <div class="current-command">
+        <span>当前命令</span>
+        <code id="current-command">等待任务下发</code>
+      </div>
+      <pre id="terminal-output" class="terminal-output"></pre>
+    </section>
+  </aside>
+</div>
+
+<dialog id="dialog-new-session" class="session-dialog">
+  <form method="dialog" class="dialog-panel">
+    <div class="section-head">
+      <div>
+        <p class="section-kicker">New Session</p>
+        <h2>新建对话</h2>
+      </div>
+    </div>
+    <label for="dialog-target">目标</label>
+    <input id="dialog-target" type="text" placeholder="https://target.local 或 192.168.1.10">
+    <label for="dialog-mode">模式</label>
+    <select id="dialog-mode">
+      <option value="chat">chat</option>
+      <option value="pentest">pentest</option>
+    </select>
+    <div class="dialog-actions">
+      <button id="dialog-cancel" class="ghost-button" type="button">取消</button>
+      <button id="dialog-confirm" class="primary-button" type="button">创建</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="app.js"></script>
+</body>
+</html>

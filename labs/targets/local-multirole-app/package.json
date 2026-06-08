@@ -1,0 +1,16 @@
+{
+  "name": "local-multirole-app",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local multi-role web application with intentional BOLA/BFLA/IDOR vulnerabilities for AegisProbe smoke testing",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "jsonwebtoken": "^9.0.2",
+    "body-parser": "^1.20.3"
+  }
+}

@@ -1,0 +1,77 @@
+{
+  "targets": [
+    {
+      "name": "Struts2 S2-045 RCE",
+      "url": "http://127.0.0.1:8080",
+      "checks": [
+        {
+          "label": "Homepage",
+          "url": "http://127.0.0.1:8080/",
+          "final_url": "http://127.0.0.1:8080/",
+          "title": "Struts2 Showcase - Fileupload sample",
+          "status": 200,
+          "screenshot": "reports/screenshots\\Struts2_S2-045_RCE_Homepage.png",
+          "body_preview": "Fileupload sample\nFile:\t\nCaption:\t\n"
+        },
+        {
+          "label": "Webshell-RCE-proof",
+          "url": "http://127.0.0.1:8080/shell.jsp?cmd=id",
+          "final_url": "http://127.0.0.1:8080/shell.jsp?cmd=id",
+          "title": "",
+          "status": 200,
+          "screenshot": "reports/screenshots\\Struts2_S2-045_RCE_Webshell-RCE-proof.png",
+          "body_preview": "uid=0(root) gid=0(root) groups=0(root)"
+        }
+      ]
+    },
+    {
+      "name": "Tomcat CVE-2017-12615 RCE",
+      "url": "http://127.0.0.1:8082",
+      "checks": [
+        {
+          "label": "Homepage",
+          "url": "http://127.0.0.1:8082/",
+          "final_url": "http://127.0.0.1:8082/",
+          "title": "Apache Tomcat/8.5.19",
+          "status": 200,
+          "screenshot": "reports/screenshots\\Tomcat_CVE-2017-12615_RCE_Homepage.png",
+          "body_preview": "Home\nDocumentation\nConfiguration\nExamples\nWiki\nMailing Lists\nFind Help\n\n\nApache Tomcat/8.5.19\nIf you're seeing this, you've successfully installed Tomcat. Congratulations!\nRecommended Reading:\nSecurity Considerations HOW-TO\nManager Application HOW-TO\nClustering/Session Replication HOW-TO\nServer Status\nManager App\nHost Manager\n\n\nDeveloper Quick Start\n\nTomcat Setup\n\nFirst Web Application\n\nRealms & AAA\n\nJDBC DataSources\n\nExamples\n\nServlet Specifications\n\nTomcat Versions\n\n\n\nManaging Tomcat\n\nFor secu"
+        },
+        {
+          "label": "POC-Webshell-RCE",
+          "url": "http://127.0.0.1:8082/poc.jsp?cmd=id",
+          "final_url": "http://127.0.0.1:8082/poc.jsp?cmd=id",
+          "title": "",
+          "status": 200,
+          "screenshot": "reports/screenshots\\Tomcat_CVE-2017-12615_RCE_POC-Webshell-RCE.png",
+          "body_preview": "Command: id\nuid=0(root) gid=0(root) groups=0(root)"
+        }
+      ]
+    },
+    {
+      "name": "Shiro CVE-2016-4437",
+      "url": "http://127.0.0.1:18080",
+      "checks": [
+        {
+          "label": "Login-Page",
+          "url": "http://127.0.0.1:18080/login",
+          "final_url": "http://127.0.0.1:18080/login",
+          "title": "Login Page",
+          "status": 200,
+          "screenshot": "reports/screenshots\\Shiro_CVE-2016-4437_Login-Page.png",
+          "body_preview": "Please sign in\nUsername\nPassword\n Remember me\nSign in"
+        },
+        {
+          "label": "RememberMe-cookie",
+          "url": "http://127.0.0.1:18080/",
+          "final_url": "http://127.0.0.1:18080/login",
+          "title": "Login Page",
+          "status": 200,
+          "screenshot": "reports/screenshots\\Shiro_CVE-2016-4437_RememberMe-cookie.png",
+          "body_preview": "Please sign in\nUsername\nPassword\n Remember me\nSign in"
+        }
+      ]
+    }
+  ],
+  "generated_at": "2026-06-03T14:30:07Z"
+}
