@@ -2266,6 +2266,9 @@ export {
   safeAnonymousFetchDetails,
   safeAuthenticatedFetch,
   safeAuthenticatedFetchDetails,
-  businessLogicProbeUrls
+  businessLogicProbeUrls,
+  collectWebPortMatrixProbe,
+  runBuiltInSecurityProbe
 } from "./security-probes.js";
-export type { SafeAuthenticatedFetchDetails, SafeReadOnlyMethod } from "./security-probes.js";
+export type { SafeAuthenticatedFetchDetails, SafeReadOnlyMethod, WebPortMatrixProbe, WebPortMatrixEntry } from "./security-probes.js";
+export type { ConversationTurnEvent } from "./conversation-loop.js";

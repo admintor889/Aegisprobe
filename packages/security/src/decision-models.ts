@@ -47,7 +47,8 @@ import { uniqueStrings, uniqueBy, normalizeName, normalizeTargetForDedupe, strip
 import { buildBusinessLogicKnowledgeBase } from "./knowledge-base.js";
 
 function supportsHostnameEnumeration(target: { kind: string; normalized: string }): boolean {
-  return !/^\d+\.\d+\.\d+\.\d+$/.test(target.normalized);
+  const host = safeHostname(target.normalized) ?? target.normalized.toLowerCase();
+  return isPublicEnumeratableHostname(host);
 }
 import { inferPhase, roleForPhase } from "./pipeline-support.js";
 // Using local utilities for getSecurityToolInventory, createDefaultPentestScope, supportsHostnameEnumeration
@@ -197,6 +198,7 @@ export function buildSecurityAssetGraph(input: {
   const liveUrls = [...nodes.values()].filter((node) => node.kind === "url");
   const hosts = [...nodes.values()].filter((node) => node.kind === "domain" || node.kind === "subdomain");
   const canEnumerateHostnames = input.target ? supportsHostnameEnumeration(input.target) : true;
+  const hasBrowserRecon = hasSuccessfulRun(toolRuns, "webapp-recon");
   const nextActions: string[] = [];
   if (canEnumerateHostnames && hosts.length <= 1 && !hasSuccessfulRun(toolRuns, "subfinder")) {
     nextActions.push("Run passive subdomain discovery with subfinder/amass, then feed discovered hosts into dnsx/httpx.");
@@ -207,7 +209,7 @@ export function buildSecurityAssetGraph(input: {
   if (hosts.length > 0 && liveUrls.length === 0 && !hasSuccessfulRun(toolRuns, "httpx")) {
     nextActions.push("Probe resolved hosts with httpx to identify live URLs, status codes, titles, TLS, and technologies.");
   }
-  if (liveUrls.length > 0 && !hasSuccessfulRun(toolRuns, "katana")) {
+  if (liveUrls.length > 0 && !hasSuccessfulRun(toolRuns, "katana") && !hasBrowserRecon) {
     nextActions.push("Crawl live URLs with katana to collect frontend routes, JavaScript files, APIs, and source-map exposures.");
   }
   if ([...nodes.values()].some((node) => node.technologies.length > 0) && !hasSuccessfulRun(toolRuns, "nuclei-tech")) {
@@ -266,6 +268,7 @@ export function buildSecurityDecisionQueue(input: {
   const cveCandidates = input.graph.nodes.flatMap((node) => node.cveMatches.map((match) => ({ node, match })));
   const findings = input.graph.nodes.flatMap((node) => node.findings.map((finding) => ({ node, finding })));
   const canEnumerateHostnames = input.target ? supportsHostnameEnumeration(input.target) : true;
+  const hasBrowserRecon = hasSuccessfulRun(input.toolRuns, "webapp-recon");
   const businessSensitiveUrls = businessPlanningUrls.filter((node) => hasBusinessWorkflowSignal(node.value));
   const adminLikeUrls = urls.filter((node) => hasAdminSurfaceSignal(node.value));
   const authSurfaceNeedsContext = findings.some(({ finding }) => /Provide at least two approved roles|Capture an authorized Playwright storage-state|register cookie\/header auth context/i.test(`${finding.title} ${finding.evidenceSummary ?? ""}`));
@@ -420,7 +423,7 @@ export function buildSecurityDecisionQueue(input: {
     }, inventory);
   }
 
-  if (urls.length > 0 && !hasSuccessfulRun(input.toolRuns, "katana")) {
+  if (urls.length > 0 && !hasSuccessfulRun(input.toolRuns, "katana") && !hasBrowserRecon) {
     pushDecision(items, {
       priority: "medium",
       phase: "frontend",
@@ -2536,6 +2539,15 @@ function hasSuccessfulRun(runs: SecurityToolRun[], toolId: string): boolean {
 
 function hasUnsuccessfulRun(runs: SecurityToolRun[], toolId: string): boolean {
   return runs.some((run) => run.toolId === toolId && ["blocked", "missing", "denied", "failed", "skipped"].includes(run.status));
+}
+
+function isPublicEnumeratableHostname(host: string): boolean {
+  const normalized = host.toLowerCase().replace(/\.$/u, "");
+  if (!normalized || normalized === "localhost") return false;
+  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(normalized)) return false;
+  if (/^\[[0-9a-f:]+\]$/i.test(normalized) || /^[0-9a-f:]+$/i.test(normalized)) return false;
+  if (!normalized.includes(".")) return false;
+  return /^[a-z0-9.-]+\.[a-z]{2,}$/i.test(normalized);
 }
 
 type DecisionApiRoute = {

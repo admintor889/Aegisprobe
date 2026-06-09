@@ -1,14 +1,14 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { createServer, type Server } from "node:http";
-import type { AddressInfo } from "node:net";
+import { createServer as createTcpServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AuditStore } from "@aegisprobe/storage";
 import type { SkillRegistry } from "@aegisprobe/skills";
 import type { ChatMessage, CompleteOptions, OpenAICompatibleProvider } from "@aegisprobe/provider";
-import { MainAgent, safeAnonymousFetchDetails, safeAuthenticatedFetchDetails } from "./index.js";
+import { MainAgent, collectWebPortMatrixProbe, safeAnonymousFetchDetails, safeAuthenticatedFetchDetails } from "./index.js";
 import { buildToolCommand, renderToolDefinitions } from "./tool-definitions.js";
 
 const requireFromTest = createRequire(import.meta.url);
@@ -1924,6 +1924,62 @@ describe("MainAgent apply_patch protocol", () => {
     }
   }, 30_000);
 
+  it("collects a short web port matrix with HTTP response evidence", async () => {
+    const server = await new Promise<{ server: Server; url: string; port: number }>((resolve) => {
+      const instance = createServer((_request, response) => {
+        response.statusCode = 200;
+        response.setHeader("Content-Type", "text/html; charset=utf-8");
+        response.end("<title>Matrix App</title>");
+      });
+      instance.listen(0, "127.0.0.1", () => {
+        const address = instance.address();
+        if (!address || typeof address === "string") {
+          throw new Error("Failed to bind local test server.");
+        }
+        resolve({ server: instance, url: `http://127.0.0.1:${address.port}/`, port: address.port });
+      });
+    });
+
+    try {
+      const matrix = await collectWebPortMatrixProbe(server.url);
+      const targetEntry = matrix.entries.find((entry) => entry.port === server.port);
+
+      expect(targetEntry).toMatchObject({
+        tcp: "open",
+        http: "response",
+        status: 200,
+        title: "Matrix App"
+      });
+      expect(matrix.interpretation.join("\n")).toContain("HTTP response observed");
+    } finally {
+      await new Promise<void>((resolve) => server.server.close(() => resolve()));
+    }
+  }, 30_000);
+
+  it("surfaces TCP-open but HTTP-nonresponsive ports without broad scanner assumptions", async () => {
+    const tcp = await new Promise<{ server: ReturnType<typeof createTcpServer>; url: string; port: number }>((resolve) => {
+      const instance = createTcpServer((socket) => {
+        socket.setTimeout(2_500);
+        socket.on("timeout", () => socket.destroy());
+      });
+      instance.listen(0, "127.0.0.1", () => {
+        const address = instance.address() as AddressInfo;
+        resolve({ server: instance, url: `http://127.0.0.1:${address.port}/`, port: address.port });
+      });
+    });
+
+    try {
+      const matrix = await collectWebPortMatrixProbe(tcp.url);
+      const targetEntry = matrix.entries.find((entry) => entry.port === tcp.port);
+
+      expect(targetEntry?.tcp).toBe("open");
+      expect(targetEntry?.http).not.toBe("response");
+      expect(matrix.interpretation.join("\n")).toContain("TCP open but HTTP");
+    } finally {
+      await new Promise<void>((resolve) => tcp.server.close(() => resolve()));
+    }
+  }, 30_000);
+
   it("extracts HTML surface from anonymous fetch and records form assets", async () => {
     const server = await new Promise<{ server: Server; url: string }>((resolve) => {
       const instance = createServer((request, response) => {
@@ -2519,6 +2575,23 @@ describe("MainAgent apply_patch protocol", () => {
     }), "utf8");
 
     const result = await agent.importApiDescriptionDocument(sessionId, specPath);
+    store.addAsset({
+      id: "asset_duplicate_get_admin_user",
+      sessionId,
+      workflowId,
+      kind: "url",
+      value: "https://example.com/api/v2/admin/users/{id}",
+      source: "browser:api-inventory-normalizer:duplicate",
+      confidence: "high",
+      metadata: JSON.stringify({
+        method: "GET",
+        pathTemplate: "/api/v2/admin/users/{id}",
+        queryParams: ["include"],
+        riskSignals: ["privileged-route"],
+        sources: ["openapi"]
+      }),
+      createdAt
+    });
     const assets = store.listAssets(sessionId);
     const evidence = store.listEvidence(sessionId);
     const matrix = agent.buildAuthorizationBoundaryMatrix(sessionId);
@@ -2535,6 +2608,7 @@ describe("MainAgent apply_patch protocol", () => {
     expect(control.evidenceCounts.normalizedApiEndpoints).toBeGreaterThanOrEqual(2);
     expect(control.evidenceCounts.apiDescriptionDocuments).toBeGreaterThanOrEqual(1);
     expect(control.routeFrontier.some((item) => item.pathTemplate === "/api/v2/admin/users/{id}" && item.score > 50)).toBe(true);
+    expect(control.routeFrontier.filter((item) => item.method === "GET" && item.pathTemplate === "/api/v2/admin/users/{id}")).toHaveLength(1);
     expect(control.routeFrontier.some((item) => item.nextAction.includes("approved role contexts") || item.nextAction.includes("safe mutation boundary"))).toBe(true);
     expect(picture.endpointMap.some((item) => item.method === "GET" && item.pathTemplate === "/api/v2/admin/users/{id}" && item.queryParams.includes("include"))).toBe(true);
     expect(picture.endpointMap.some((item) => item.method === "PATCH" && item.bodyParamHints.includes("profile.email"))).toBe(true);

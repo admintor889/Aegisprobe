@@ -4,8 +4,9 @@ import { spawn } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AuditStore } from "../packages/storage/dist/index.js";
-import { MainAgent } from "../packages/core/dist/index.js";
-import { newId, nowIso } from "../packages/shared/dist/index.js";
+import { MainAgent, runBuiltInSecurityProbe } from "../packages/core/dist/index.js";
+import { buildPayloadCandidateSet, buildPayloadRequestDraftSet } from "../packages/security/dist/index.js";
+import { newId, nowIso, parseTargetInput } from "../packages/shared/dist/index.js";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -102,10 +103,56 @@ function scopeFor(target, activeProof) {
   };
 }
 
+async function collectAndRecordBaseline(caseSpec, target, store, sessionId, workflowId) {
+  const parsed = parseTargetInput(target);
+  if (parsed.kind !== "url" && parsed.kind !== "domain") {
+    throw new Error(`Lab smoke target must be a URL or domain: ${target}`);
+  }
+  const startedAt = nowIso();
+  const summary = await runBuiltInSecurityProbe(parsed, "basic_recon");
+  const endedAt = nowIso();
+  store.addSecurityToolRun({
+    id: newId("run"),
+    sessionId,
+    workflowId,
+    toolId: "basic_recon",
+    phase: "baseline",
+    origin: "manual",
+    status: /HTTP response observed|status:\s*[1-5]\d\d/i.test(summary) ? "success" : "no_findings",
+    inputKind: parsed.kind,
+    inputCount: 1,
+    outputSummary: summary.slice(0, 1000),
+    findingCount: 0,
+    createdAt: startedAt,
+    updatedAt: endedAt
+  });
+  store.addObservation({
+    id: newId("obs"),
+    sessionId,
+    source: `lab-smoke:basic_recon:${caseSpec.id}`,
+    summary,
+    createdAt: endedAt
+  });
+  store.addEvidence({
+    id: newId("evd"),
+    sessionId,
+    workflowId,
+    source: `lab-smoke:basic_recon:${caseSpec.id}`,
+    kind: "http",
+    summary,
+    data: summary,
+    createdAt: endedAt
+  });
+  return summary;
+}
+
 async function runSafeProof(caseSpec, target, store, sessionId, workflowId, agent) {
   const proof = caseSpec.safeProof;
   if (!proof) {
     return { status: "skipped", reason: "case has no safeProof" };
+  }
+  if (proof.kind === "commandOutput") {
+    return await runCommandOutputProof(caseSpec, target, store, sessionId, workflowId, proof);
   }
   if (proof.kind === "responseStatusComparison") {
     return await runResponseStatusComparisonProof(caseSpec, target, store, sessionId, workflowId, proof);
@@ -193,12 +240,162 @@ async function runSafeProof(caseSpec, target, store, sessionId, workflowId, agen
 
   return {
     status: passed ? "validated" : "not_observed",
+    level: "vulnerability",
     url,
     responseStatus: response.status,
     expectedHeader: proof.expectHeader,
     actualHeader,
     evidenceId
   };
+}
+
+async function runCommandOutputProof(caseSpec, target, store, sessionId, workflowId, proof) {
+  if (proof.insecureTls) {
+    process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
+  }
+  const urlObject = new URL(targetPathUrl(target, proof.path || "/"));
+  if (proof.scheme) {
+    urlObject.protocol = `${proof.scheme}:`;
+  }
+  for (const [name, value] of Object.entries(proof.query || {})) {
+    urlObject.searchParams.set(name, String(value));
+  }
+  const url = urlObject.href;
+  const startedAt = nowIso();
+  const response = await fetch(url, {
+    method: proof.method || "GET",
+    headers: proof.headers || {},
+    body: proof.body,
+    redirect: "manual"
+  });
+  const body = await safeResponseText(response);
+  const expectedStatus = proof.expect?.status;
+  const expectedHeader = proof.expect?.header;
+  const actualHeader = expectedHeader?.name ? response.headers.get(expectedHeader.name) : undefined;
+  const contains = Array.isArray(proof.expect?.bodyContains)
+    ? proof.expect.bodyContains
+    : proof.expect?.bodyContains ? [proof.expect.bodyContains] : [];
+  const matches = Array.isArray(proof.expect?.bodyMatches)
+    ? proof.expect.bodyMatches
+    : proof.expect?.bodyMatches ? [proof.expect.bodyMatches] : [];
+  const headerContains = Array.isArray(expectedHeader?.contains)
+    ? expectedHeader.contains
+    : expectedHeader?.contains ? [expectedHeader.contains] : [];
+  const headerMatches = Array.isArray(expectedHeader?.matches)
+    ? expectedHeader.matches
+    : expectedHeader?.matches ? [expectedHeader.matches] : [];
+  const outputMatches = {
+    bodyContains: contains.map((value) => ({ value, snippet: textSnippetAround(body, value) })).filter((item) => item.snippet),
+    bodyMatches: matches.map((pattern) => ({ pattern, match: firstRegexMatch(body, pattern) })).filter((item) => item.match),
+    headerContains: headerContains.map((value) => ({ value, snippet: textSnippetAround(actualHeader || "", value) })).filter((item) => item.snippet),
+    headerMatches: headerMatches.map((pattern) => ({ pattern, match: firstRegexMatch(actualHeader || "", pattern) })).filter((item) => item.match)
+  };
+  const passed = (expectedStatus === undefined || response.status === expectedStatus)
+    && contains.every((value) => body.includes(value))
+    && matches.every((pattern) => new RegExp(pattern, "i").test(body))
+    && (!expectedHeader || Boolean(actualHeader))
+    && headerContains.every((value) => actualHeader?.includes(value))
+    && headerMatches.every((pattern) => new RegExp(pattern, "i").test(actualHeader || ""));
+  const endedAt = nowIso();
+  const evidenceId = newId("evd");
+  const command = proof.command || "id";
+  const summary = passed
+    ? `Shell-level lab proof executed controlled OS command '${command}' and observed expected output.`
+    : `Shell-level lab proof did not observe expected output for controlled OS command '${command}'.`;
+
+  store.addSecurityToolRun({
+    id: newId("run"),
+    sessionId,
+    workflowId,
+    toolId: `lab-proof:${caseSpec.id}`,
+    phase: "safe_validation",
+    origin: "manual",
+    status: passed ? "success" : "no_findings",
+    inputKind: "url",
+    inputCount: 1,
+    outputSummary: summary,
+    findingCount: passed ? 1 : 0,
+    createdAt: startedAt,
+    updatedAt: endedAt
+  });
+  store.addEvidence({
+    id: evidenceId,
+    sessionId,
+    workflowId,
+    source: `lab-proof:${caseSpec.id}`,
+    kind: "http",
+    summary,
+    data: JSON.stringify({
+      url,
+      method: proof.method || "GET",
+      status: response.status,
+      contentType: response.headers.get("content-type"),
+      expectedHeader,
+      actualHeader,
+      command,
+      outputExcerpt: body.slice(0, 1000),
+      outputMatches,
+      shellLevelProof: true,
+      destructiveActions: false,
+      reverseShellRequested: false,
+      fileReadOrWriteRequested: false
+    }, null, 2),
+    createdAt: endedAt
+  });
+
+  if (passed && proof.finding) {
+    store.upsertFinding({
+      id: newId("fnd"),
+      sessionId,
+      workflowId,
+      title: proof.finding.title,
+      severity: proof.finding.severity || "critical",
+      confidence: "high",
+      target: url,
+      description: proof.finding.description,
+      evidenceSummary: summary,
+      remediation: proof.finding.remediation,
+      state: "validated",
+      dedupeKey: `lab-proof:${caseSpec.id}:${url}`,
+      evidenceIds: [evidenceId],
+      firstSeenAt: endedAt,
+      lastSeenAt: endedAt,
+      createdAt: endedAt,
+      updatedAt: endedAt
+    });
+  }
+
+  return {
+    status: passed ? "validated" : "not_observed",
+    level: passed ? "shell" : "not_observed",
+    capability: "os_command_execution",
+    serviceCompromised: passed,
+    url,
+    responseStatus: response.status,
+    command,
+    actualHeader,
+    outputExcerpt: body.slice(0, 300),
+    outputMatches,
+    evidenceId
+  };
+}
+
+function firstRegexMatch(text, pattern) {
+  try {
+    const match = new RegExp(pattern, "i").exec(text || "");
+    return match?.[0]?.slice(0, 200);
+  } catch {
+    return undefined;
+  }
+}
+
+function textSnippetAround(text, value) {
+  const haystack = text || "";
+  const needle = String(value || "");
+  if (!needle) return undefined;
+  const index = haystack.indexOf(needle);
+  if (index < 0) return undefined;
+  return haystack.slice(Math.max(0, index - 80), index + needle.length + 80);
 }
 
 async function runMultiRoleAuthzProof(caseSpec, target, store, sessionId, workflowId, proof, agent) {
@@ -299,6 +496,7 @@ async function runMultiRoleAuthzProof(caseSpec, target, store, sessionId, workfl
 
   return {
     status: validated ? "validated" : "not_observed",
+    level: "vulnerability",
     authContexts: authContexts.map((ctx) => ({ name: ctx.name, role: ctx.role, tenant: ctx.tenant })),
     findingCount: findings.length,
     policyFinding: policyFinding ? {
@@ -411,6 +609,7 @@ async function runResponseStatusComparisonProof(caseSpec, target, store, session
 
   return {
     status: passed ? "validated" : "not_observed",
+    level: "vulnerability",
     control: { url: controlUrl, status: control.status },
     candidate: { url: candidateUrl, status: candidate.status },
     evidenceId
@@ -503,6 +702,15 @@ function runAssertions(caseSpec, report) {
   }
   for (const text of expect.expertSnapshotContains || []) {
     checks.push(check(`expert snapshot contains ${text}`, report.expertSnapshot?.excerpt?.includes(text), report.expertSnapshot));
+  }
+  for (const text of expect.baselineProbeContains || []) {
+    checks.push(check(`baseline probe contains ${text}`, report.baselineProbe?.excerpt?.includes(text), report.baselineProbe));
+  }
+  for (const category of expect.payloadCategoriesInclude || []) {
+    checks.push(check(`payload candidates include ${category}`, report.payloadWorkbench?.candidateCategories?.includes(category), report.payloadWorkbench?.candidateCategories));
+  }
+  for (const category of expect.payloadDraftCategoriesInclude || []) {
+    checks.push(check(`payload drafts include ${category}`, report.payloadWorkbench?.draftCategories?.includes(category), report.payloadWorkbench?.draftCategories));
   }
   if (Number.isFinite(expect.performance?.maxTotalMs)) {
     checks.push(check(`totalMs <= ${expect.performance.maxTotalMs}`, report.timings.totalMs <= expect.performance.maxTotalMs, report.timings.totalMs));
@@ -630,6 +838,80 @@ function summarizeRecon(recon) {
   };
 }
 
+function mergeReconResults(results) {
+  const nonEmpty = results.filter(Boolean);
+  if (nonEmpty.length === 0) {
+    return {
+      pagesVisited: [],
+      forms: [],
+      networkRequests: [],
+      jsEndpoints: [],
+      apiInventory: [],
+      normalizedApiEndpoints: [],
+      authAssessment: undefined
+    };
+  }
+  return {
+    pagesVisited: uniqueStrings(nonEmpty.flatMap((item) => item.pagesVisited || [])),
+    forms: uniqueByKey(nonEmpty.flatMap((item) => item.forms || []), (form) =>
+      [form.pageUrl, form.method, form.action, ...(form.inputNames || [])].join("|")
+    ),
+    networkRequests: uniqueByKey(nonEmpty.flatMap((item) => item.networkRequests || []), stableObjectKey),
+    jsEndpoints: uniqueByKey(nonEmpty.flatMap((item) => item.jsEndpoints || []), stableObjectKey),
+    apiInventory: uniqueByKey(nonEmpty.flatMap((item) => item.apiInventory || []), stableObjectKey),
+    normalizedApiEndpoints: uniqueByKey(nonEmpty.flatMap((item) => item.normalizedApiEndpoints || []), (endpoint) =>
+      [endpoint.method, endpoint.pathTemplate, ...(endpoint.queryParams || []), ...(endpoint.bodyParamHints || [])].join("|")
+    ),
+    authAssessment: strongestAuthAssessment(nonEmpty.map((item) => item.authAssessment).filter(Boolean))
+  };
+}
+
+function uniqueByKey(values, keyFor) {
+  const seen = new Set();
+  const out = [];
+  for (const value of values) {
+    const key = keyFor(value);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(value);
+  }
+  return out;
+}
+
+function stableObjectKey(value) {
+  if (!value || typeof value !== "object") return String(value);
+  return JSON.stringify(Object.keys(value).sort().reduce((out, key) => {
+    out[key] = value[key];
+    return out;
+  }, {}));
+}
+
+function strongestAuthAssessment(assessments) {
+  return assessments
+    .slice()
+    .sort((left, right) => authAssessmentScore(right) - authAssessmentScore(left))
+    .at(0);
+}
+
+function authAssessmentScore(assessment) {
+  if (!assessment) return 0;
+  let score = 0;
+  if (assessment.login === "present") score += 30;
+  if (assessment.registration === "present") score += 8;
+  if (assessment.authState && assessment.authState !== "unknown") score += 10;
+  score += confidenceScore(assessment.confidence);
+  score += Math.min(10, (assessment.authEndpoints || []).length * 2);
+  score += Math.min(10, (assessment.highValueFlows || []).length * 2);
+  score += Math.min(6, (assessment.riskSignals || []).length);
+  return score;
+}
+
+function confidenceScore(value) {
+  if (value === "high") return 6;
+  if (value === "medium") return 3;
+  return 0;
+}
+
 function summarizeControlPlane(control) {
   return {
     stage: control.stage,
@@ -658,6 +940,66 @@ function summarizeOperatingPicture(picture) {
     allowedNextActions: picture.allowedNextActions,
     blockedUntilEvidence: picture.blockedUntilEvidence,
     decisionFrame: picture.decisionFrame
+  };
+}
+
+function buildPayloadWorkbenchReport(caseSpec, target, store, sessionId, workflowId, activeAllowed) {
+  const parsedTarget = parseTargetInput(target);
+  const input = {
+    target: parsedTarget.kind === "url" || parsedTarget.kind === "domain" ? parsedTarget : undefined,
+    assets: store.listAssets(sessionId).filter((item) => !workflowId || !item.workflowId || item.workflowId === workflowId),
+    evidence: store.listEvidence(sessionId).filter((item) => !workflowId || !item.workflowId || item.workflowId === workflowId),
+    technologies: store.listTechnologies(sessionId).filter((item) => !workflowId || !item.workflowId || item.workflowId === workflowId),
+    cveMatches: store.listCveMatches(sessionId).filter((item) => !workflowId || !item.workflowId || item.workflowId === workflowId),
+    authContexts: store.listSecurityAuthContexts(sessionId, workflowId),
+    marker: caseSpec.id.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 24) || "lab",
+    activeAllowed,
+    maxCandidates: 12,
+    maxDrafts: 12
+  };
+  const candidates = buildPayloadCandidateSet(input);
+  const drafts = buildPayloadRequestDraftSet(input);
+  return {
+    candidateSummary: candidates.summary,
+    draftSummary: drafts.summary,
+    candidateCategories: uniqueStrings(candidates.candidates.map((candidate) => candidate.category)),
+    draftCategories: uniqueStrings(drafts.drafts.map((draft) => draft.category)),
+    candidates: candidates.candidates.slice(0, 12).map((candidate) => ({
+      id: candidate.id,
+      category: candidate.category,
+      title: candidate.title,
+      risk: candidate.risk,
+      requiresApproval: candidate.requiresApproval,
+      targetHints: candidate.targetHints.slice(0, 4),
+      insertionHints: candidate.insertionHints.slice(0, 6).map((hint) => ({
+        endpoint: hint.endpoint,
+        method: hint.method,
+        location: hint.location,
+        name: hint.name,
+        riskSignals: hint.riskSignals.slice(0, 4)
+      })),
+      payloads: candidate.payloads.slice(0, 4)
+    })),
+    drafts: drafts.drafts.slice(0, 12).map((draft) => ({
+      candidateId: draft.candidateId,
+      category: draft.category,
+      risk: draft.risk,
+      requiresApproval: draft.requiresApproval,
+      recommendedTool: draft.recommendedTool,
+      method: draft.method,
+      url: draft.url,
+      baselineUrl: draft.baselineUrl,
+      insertion: {
+        endpoint: draft.insertion.endpoint,
+        method: draft.insertion.method,
+        location: draft.insertion.location,
+        name: draft.insertion.name,
+        riskSignals: draft.insertion.riskSignals.slice(0, 4)
+      },
+      bodyPreview: draft.bodyPreview,
+      payload: draft.payload
+    })),
+    evidenceGaps: uniqueStrings([...candidates.evidenceGaps, ...drafts.evidenceGaps])
   };
 }
 
@@ -713,6 +1055,9 @@ async function main() {
       target,
       ...(caseSpec.target?.seedPaths || []).map((path) => targetPathUrl(target, path))
     ]);
+    const baselineStartedMs = Date.now();
+    const baselineProbe = await collectAndRecordBaseline(caseSpec, target, store, sessionId, workflowId);
+    const baselineEndedMs = Date.now();
     const reconStartedMs = Date.now();
     const reconResults = [];
     for (const seedUrl of seedUrls) {
@@ -721,10 +1066,13 @@ async function main() {
         analyzeJs: true
       }));
     }
-    const recon = reconResults[reconResults.length - 1] || await agent.reconWebApplication(sessionId, target, {
-      maxPages: Number.isFinite(options.maxPages) ? options.maxPages : 2,
-      analyzeJs: true
-    });
+    if (reconResults.length === 0) {
+      reconResults.push(await agent.reconWebApplication(sessionId, target, {
+        maxPages: Number.isFinite(options.maxPages) ? options.maxPages : 2,
+        analyzeJs: true
+      }));
+    }
+    const recon = mergeReconResults(reconResults);
     const reconEndedMs = Date.now();
     const queueBefore = agent.buildSecurityDecisionQueue(sessionId, scope).items.slice(0, 8);
     const controlBefore = agent.buildWebPentestControlPlane(sessionId, workflowId);
@@ -741,6 +1089,7 @@ async function main() {
       ? await runSafeProof(caseSpec, target, store, sessionId, workflowId, agent)
       : { status: "skipped", reason: "run with --active-proof to execute the configured non-destructive proof" };
     const proofEndedMs = Date.now();
+    const payloadWorkbench = buildPayloadWorkbenchReport(caseSpec, target, store, sessionId, workflowId, options.activeProof);
     const queueAfter = agent.buildSecurityDecisionQueue(sessionId, scope).items.slice(0, 8);
     const controlAfter = agent.buildWebPentestControlPlane(sessionId, workflowId);
     const operatingAfter = agent.buildWebPentestOperatingPicture(sessionId, workflowId);
@@ -760,11 +1109,19 @@ async function main() {
         processId: targetProcess.processId
       } : undefined,
       timings: {
+        baselineMs: baselineEndedMs - baselineStartedMs,
         reconMs: reconEndedMs - reconStartedMs,
         decisionMs: decisionEndedMs - decisionStartedMs,
         proofMs: proofEndedMs - proofStartedMs,
         totalMs: Date.now() - startedAtMs
       },
+      baselineProbe: {
+        bytes: Buffer.byteLength(baselineProbe, "utf8"),
+        containsWebPortMatrix: baselineProbe.includes("Web port/HTTP matrix"),
+        containsHttpResponse: /HTTP response observed|status:\s*[1-5]\d\d/i.test(baselineProbe),
+        excerpt: baselineProbe.slice(0, 4000)
+      },
+      payloadWorkbench,
       recon: summarizeRecon(recon),
       queue: {
         before: queueBefore.map(summarizeQueueItem),
@@ -804,7 +1161,12 @@ async function main() {
       }
     };
     report.assertions = runAssertions(caseSpec, report);
-    report.passed = report.assertions.every((item) => item.passed) && (!options.activeProof || report.proof.status === "validated");
+    const assertionsPassed = report.assertions.every((item) => item.passed);
+    const expectedProofLevel = caseSpec.safeProof?.level;
+    const proofPassed = report.proof.status === "validated"
+      && (!expectedProofLevel || report.proof.level === expectedProofLevel);
+    report.serviceCompromised = report.proof.serviceCompromised === true;
+    report.passed = options.activeProof ? proofPassed : assertionsPassed;
     writeFileSync(outPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
     console.log(JSON.stringify({
       passed: report.passed,
@@ -824,10 +1186,29 @@ async function main() {
       },
       queueAfter: report.queue.after,
       proof: report.proof,
+      serviceCompromised: report.serviceCompromised,
       expertSnapshot: {
         bytes: report.expertSnapshot.bytes,
         containsAccessExposure: report.expertSnapshot.containsAccessExposure,
         containsPayloadAffordances: report.expertSnapshot.containsPayloadAffordances
+      },
+      payloadWorkbench: {
+        candidateCategories: report.payloadWorkbench.candidateCategories,
+        draftCategories: report.payloadWorkbench.draftCategories,
+        topCandidates: report.payloadWorkbench.candidates.slice(0, 5).map((candidate) => ({
+          id: candidate.id,
+          category: candidate.category,
+          risk: candidate.risk,
+          insertionHints: candidate.insertionHints.slice(0, 3)
+        })),
+        topDrafts: report.payloadWorkbench.drafts.slice(0, 5).map((draft) => ({
+          candidateId: draft.candidateId,
+          category: draft.category,
+          recommendedTool: draft.recommendedTool,
+          requiresApproval: draft.requiresApproval,
+          method: draft.method,
+          insertion: draft.insertion
+        }))
       },
       failedAssertions: report.assertions.filter((item) => !item.passed).map((item) => item.name)
     }, null, 2));

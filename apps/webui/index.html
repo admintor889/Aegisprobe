@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>aegisprobe | 渗透工作台</title>
+<title>AegisProbe | Agent Console</title>
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="style.css">
 </head>
@@ -13,7 +13,7 @@
     <div class="sidebar-head panel-card">
       <div class="workspace-tab">
         <span class="tab-dot"></span>
-        <span id="workspace-name" class="workspace-tab-name">agent-pentest-assistant</span>
+        <span id="workspace-name" class="workspace-tab-name">AegisProbe Console</span>
       </div>
       <div class="sidebar-head-actions">
         <button id="btn-new-session" class="primary-button" type="button">+ 新会话</button>
@@ -23,9 +23,9 @@
     <section class="sidebar-panel panel-card">
       <div class="workspace-picker-row">
         <div class="workspace-pill">
-          <span class="workspace-pill-icon">DIR</span>
+          <span class="workspace-pill-icon">AG</span>
           <div class="workspace-pill-copy">
-            <span class="workspace-pill-label">工作目录</span>
+            <span class="workspace-pill-label">workspace</span>
             <strong id="workspace-short-name">agent-pentest-assistant</strong>
           </div>
         </div>
@@ -59,8 +59,8 @@
     <section class="sidebar-panel panel-card quick-panel">
       <div class="section-head compact">
         <span>
-          <p class="section-kicker">快速入口</p>
-          <h2>CVE 库</h2>
+          <p class="section-kicker">Runbook</p>
+          <h2>安全资料</h2>
         </span>
       </div>
       <a class="quick-link compact-link" href="https://nvd.nist.gov/vuln/search" target="_blank" rel="noreferrer">
@@ -77,8 +77,8 @@
     <section class="chat-shell panel-card">
       <header class="chatbar">
         <div class="chatbar-main">
-          <p class="section-kicker">Agent Console</p>
-          <h2 id="chat-title" class="topbar-title">新对话</h2>
+          <p class="section-kicker">AegisProbe</p>
+          <h2 id="chat-title" class="topbar-title">Agent Console</h2>
         </div>
       </header>
 
@@ -99,8 +99,8 @@
         <div class="welcome-card centered">
           <div class="welcome-badge">aegisprobe</div>
           <div>
-            <h3>输入自然语言任务</h3>
-            <p>例如：先做资产识别，再判断是否存在可利用漏洞。</p>
+            <h3>像终端一样下达任务</h3>
+            <p>描述目标、约束和验证标准，AegisProbe 会把推理、工具调用和证据流同步到这里。</p>
           </div>
         </div>
       </section>
@@ -108,7 +108,11 @@
       <section class="composer">
         <textarea id="chat-input" rows="1" placeholder="输入自然语言任务..."></textarea>
         <div class="composer-toolbar">
-          <div></div>
+          <div class="composer-hints">
+            <span>Enter 发送</span>
+            <span>Shift Enter 换行</span>
+            <span>/help 命令</span>
+          </div>
           <div class="composer-right">
             <a id="btn-download-report" class="ghost-button" target="_blank" style="display:none">下载报告</a>
             <div class="model-pill">

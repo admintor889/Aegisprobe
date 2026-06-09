@@ -249,6 +249,162 @@ describe("security workflow", () => {
     expect(renderPayloadRequestDraftSet(adminDraftSet)).not.toContain("body.password");
   });
 
+  it("keeps off-origin resources and URL ports out of payload insertion hints", () => {
+    const createdAt = new Date().toISOString();
+    const target = { kind: "url" as const, raw: "http://127.0.0.1:4280/", normalized: "http://127.0.0.1:4280/" };
+    const assets = [
+      {
+        id: "root",
+        sessionId: "s1",
+        workflowId: "w1",
+        kind: "url",
+        value: "http://127.0.0.1:4280/",
+        source: "security_probe:basic_recon",
+        confidence: "high",
+        metadata: JSON.stringify({ method: "GET" }),
+        createdAt
+      },
+      {
+        id: "login",
+        sessionId: "s1",
+        workflowId: "w1",
+        kind: "url",
+        value: "http://127.0.0.1:4280/vulnerabilities/sqli/login.php",
+        source: "browser:api-inventory-normalizer",
+        confidence: "medium",
+        metadata: JSON.stringify({
+          method: "POST",
+          bodyParamHints: ["username", "password", "user_token", "Login"],
+          riskSignals: ["auth-surface", "state-changing-method"]
+        }),
+        createdAt
+      },
+      {
+        id: "external",
+        sessionId: "s1",
+        workflowId: "w1",
+        kind: "url",
+        value: "https://www.google.com/recaptcha/admin/create",
+        source: "browser:webapp-recon:resource",
+        confidence: "medium",
+        metadata: JSON.stringify({ method: "GET", riskSignals: ["privileged-route"] }),
+        createdAt
+      }
+    ] satisfies NonNullable<Parameters<typeof buildPayloadCandidateSet>[0]["assets"]>;
+    const evidence = [
+      {
+        id: "e1",
+        sessionId: "s1",
+        workflowId: "w1",
+        source: "browser:webapp-recon",
+        kind: "tool",
+        summary: "Observed DVWA SQLi login form and external recaptcha link.",
+        data: "POST /vulnerabilities/sqli/login.php username password user_token\nGET https://www.google.com/recaptcha/admin/create",
+        createdAt
+      }
+    ] satisfies NonNullable<Parameters<typeof buildPayloadCandidateSet>[0]["evidence"]>;
+
+    const set = buildPayloadCandidateSet({ target, assets, evidence, marker: "dvwa", maxCandidates: 12 });
+    const drafts = buildPayloadRequestDraftSet({ target, assets, evidence, marker: "dvwa", maxDrafts: 12 });
+    const rendered = `${renderPayloadCandidateSet(set)}\n${renderPayloadRequestDraftSet(drafts)}`;
+    const sqli = set.candidates.find((candidate) => candidate.category === "sql_injection");
+
+    expect(sqli?.insertionHints.some((hint) => hint.location === "body" && hint.name === "username")).toBe(true);
+    expect(sqli?.insertionHints[0]?.endpoint).toContain("/vulnerabilities/sqli/login.php");
+    expect(["username", "password"]).toContain(sqli?.insertionHints[0]?.name);
+    expect(set.candidates.some((candidate) => candidate.category === "authz_object_reference")).toBe(false);
+    expect(rendered).not.toContain("google.com");
+    expect(rendered).not.toContain("numeric-id");
+    expect(drafts.drafts.some((draft) => draft.category === "sql_injection" && draft.bodyPreview?.includes("username"))).toBe(true);
+    expect(drafts.drafts.slice(0, 5).some((draft) => draft.category === "sql_injection")).toBe(true);
+    expect(drafts.drafts.some((draft) => draft.category === "xss_reflection")).toBe(true);
+    const diversityKeys = drafts.drafts.map((draft) => `${draft.category}:${draft.method}:${draft.insertion.endpoint}:${draft.insertion.location}:${draft.insertion.name ?? ""}`);
+    expect(new Set(diversityKeys).size).toBe(diversityKeys.length);
+  });
+
+  it("generates SSTI candidates from server-rendered parameter evidence", () => {
+    const createdAt = new Date().toISOString();
+    const target = { kind: "url" as const, raw: "http://127.0.0.1:8000", normalized: "http://127.0.0.1:8000" };
+    const set = buildPayloadCandidateSet({
+      target,
+      assets: [
+        {
+          id: "route-name",
+          sessionId: "s1",
+          workflowId: "w1",
+          kind: "url",
+          value: "http://127.0.0.1:8000/?name=sample",
+          source: "browser:webapp-recon:network",
+          confidence: "high",
+          metadata: JSON.stringify({ method: "GET", queryParams: ["name"] }),
+          createdAt
+        }
+      ],
+      evidence: [
+        {
+          id: "e1",
+          sessionId: "s1",
+          workflowId: "w1",
+          source: "security_probe:http_headers",
+          kind: "http",
+          summary: "HTTP response observed from a server-rendered HTML endpoint.",
+          data: "status: 200 OK\nserver: gunicorn/20.0.0\ncontent-type: text/html; charset=utf-8\nGET /?name=sample",
+          createdAt
+        }
+      ],
+      marker: "unit",
+      activeAllowed: true
+    });
+
+    const ssti = set.candidates.find((candidate) => candidate.category === "ssti");
+    expect(ssti).toBeDefined();
+    expect(ssti?.insertionHints.some((hint) => hint.location === "query" && hint.name === "name")).toBe(true);
+    expect(renderPayloadCandidateSet(set)).toContain("Server-side template expression probes");
+  });
+
+  it("generates parser/header injection candidates from multipart parser evidence", () => {
+    const createdAt = new Date().toISOString();
+    const target = { kind: "url" as const, raw: "http://127.0.0.1:8080", normalized: "http://127.0.0.1:8080" };
+    const assets = [
+      {
+        id: "upload-route",
+        sessionId: "s1",
+        workflowId: "w1",
+        kind: "url",
+        value: "http://127.0.0.1:8080/doUpload.action",
+        source: "browser:api-inventory-normalizer",
+        confidence: "medium",
+        metadata: JSON.stringify({
+          method: "POST",
+          bodyParamHints: ["caption", "upload"],
+          riskSignals: ["file-handling", "state-changing-method"]
+        }),
+        createdAt
+      }
+    ] satisfies NonNullable<Parameters<typeof buildPayloadCandidateSet>[0]["assets"]>;
+    const evidence = [
+      {
+        id: "e1",
+        sessionId: "s1",
+        workflowId: "w1",
+        source: "security_probe:http_headers",
+        kind: "http",
+        summary: "Java action upload form with multipart parser behavior.",
+        data: "server: Apache-Coyote\ncontent-type: text/html\nPOST /doUpload.action multipart/form-data upload caption parser",
+        createdAt
+      }
+    ] satisfies NonNullable<Parameters<typeof buildPayloadCandidateSet>[0]["evidence"]>;
+
+    const set = buildPayloadCandidateSet({ target, assets, evidence, marker: "unit", activeAllowed: true, maxCandidates: 12 });
+    const drafts = buildPayloadRequestDraftSet({ target, assets, evidence, marker: "unit", activeAllowed: true, maxDrafts: 12 });
+    const parserCandidate = set.candidates.find((candidate) => candidate.category === "parser_header_injection");
+
+    expect(parserCandidate).toBeDefined();
+    expect(parserCandidate?.insertionHints.some((hint) => hint.location === "header" && hint.name === "Content-Type")).toBe(true);
+    expect(drafts.drafts.some((draft) => draft.category === "parser_header_injection" && draft.headerPreview?.some((header) => header.startsWith("Content-Type:")))).toBe(true);
+    expect(renderPayloadCandidateSet(set)).toContain("Parser and header expression probes");
+  });
+
   it("builds reviewable payload request drafts with execution gates but does not execute them", () => {
     const createdAt = new Date().toISOString();
     const target = { kind: "url" as const, raw: "http://127.0.0.1:3000", normalized: "http://127.0.0.1:3000" };
@@ -740,6 +896,16 @@ describe("security workflow", () => {
           hasPassword: false,
           hasCsrfToken: true,
           riskSignals: ["business-workflow"]
+        },
+        {
+          pageUrl: "https://example.com/orders/1001",
+          action: "https://www.google.com/recaptcha/admin/create",
+          method: "GET",
+          inputNames: ["site"],
+          inputTypes: ["text"],
+          hasPassword: false,
+          hasCsrfToken: false,
+          riskSignals: ["privileged-route"]
         }
       ],
       artifactPath: "webapp-recon.json",
@@ -750,13 +916,15 @@ describe("security workflow", () => {
         { pageUrl: "https://example.com/orders/1001", url: "https://example.com/api/orders/1001/refund?csrf=abc123", method: "POST", resourceType: "xhr", status: 403, contentType: "application/json", requestBodyPreview: "{\"reason\":\"duplicate\",\"amount\":10,\"csrf\":\"secret\",\"4537820efe33822f81a847271fde1343\":\"1\"}" }
       ],
       jsEndpoints: [
-        { scriptUrl: "https://example.com/app.js", value: "/api/orders/1003", normalizedUrl: "https://example.com/api/orders/1003", method: "GET", confidence: "medium", riskSignals: [] }
+        { scriptUrl: "https://example.com/app.js", value: "/api/orders/1003", normalizedUrl: "https://example.com/api/orders/1003", method: "GET", confidence: "medium", riskSignals: [] },
+        { scriptUrl: "https://example.com/app.js", value: "https://www.google.com/recaptcha/admin/create", normalizedUrl: "https://www.google.com/recaptcha/admin/create", method: "GET", confidence: "medium", riskSignals: ["privileged-route"] }
       ],
       jsSensitiveSignals: [],
       apiInventory: [
         { url: "https://example.com/api/orders/1001?include=items&access_token=secret-value", method: "GET", source: "network", confidence: "high", riskSignals: [] },
         { url: "https://example.com/api/orders/1002?include=items", method: "GET", source: "network", confidence: "high", riskSignals: [] },
-        { url: "https://example.com/api/orders/1001/refund?csrf=abc123", method: "POST", source: "form", confidence: "medium", riskSignals: ["business-workflow"] }
+        { url: "https://example.com/api/orders/1001/refund?csrf=abc123", method: "POST", source: "form", confidence: "medium", riskSignals: ["business-workflow"] },
+        { url: "https://www.google.com/recaptcha/admin/create", method: "GET", source: "resource", confidence: "medium", riskSignals: ["privileged-route"] }
       ],
       authSurface: {
         loginPages: [],
@@ -782,6 +950,8 @@ describe("security workflow", () => {
     expect(refund?.bodyParamHints).not.toContain("4537820efe33822f81a847271fde1343");
     expect(refund?.authRequired).toBe("likely");
     expect(refund?.riskSignals).toContain("state-changing-method");
+    expect(endpoints.some((endpoint) => endpoint.pathTemplate === "/recaptcha/admin/create")).toBe(false);
+    expect(endpoints.flatMap((endpoint) => endpoint.examples).some((example) => example.includes("google.com"))).toBe(false);
   });
 
   it("strips servlet matrix session parameters from normalized API routes", () => {
@@ -979,6 +1149,7 @@ describe("security workflow", () => {
       jsSensitiveSignals: [],
       apiInventory: [
         { url: "https://example.com/auth/login", method: "POST", source: "form", confidence: "high", riskSignals: ["auth-surface"] },
+        { url: "https://example.com/register.mvc", method: "POST", source: "form", confidence: "medium", riskSignals: ["auth-surface", "state-changing-method"] },
         { url: "https://example.com/api/admin/users", method: "GET", source: "script", confidence: "high", riskSignals: ["admin-route"] },
         { url: "https://example.com/api/orders/1001", method: "GET", source: "network", confidence: "high", riskSignals: [] }
       ],
@@ -988,7 +1159,7 @@ describe("security workflow", () => {
       ],
       authSurface: {
         loginPages: ["https://example.com/login"],
-        authEndpoints: ["https://example.com/auth/login"],
+        authEndpoints: ["https://example.com/auth/login", "https://example.com/register.mvc"],
         passwordForms: [
           {
             pageUrl: "https://example.com/login",
@@ -1009,6 +1180,8 @@ describe("security workflow", () => {
     const serialized = JSON.stringify(assessment);
 
     expect(assessment.login).toBe("present");
+    expect(assessment.registration).toBe("present");
+    expect(assessment.authEndpoints).toEqual(expect.arrayContaining(["https://example.com/register.mvc"]));
     expect(assessment.authState).toBe("authenticated");
     expect(assessment.sessionMechanisms).toEqual(expect.arrayContaining(["cookie", "jwt", "localStorage", "authorization-header"]));
     expect(assessment.csrfSignals).toBe("missing_in_password_forms");
@@ -1785,10 +1958,9 @@ describe("security workflow", () => {
       scope: createDefaultPentestScope(target)
     });
 
-    // Domain targets may include subdomain recommendations (normal behavior with expanded tool chain)
     expect(graph.nextActions.length).toBeGreaterThan(0);
-    // With expanded tool chain, some decision items may reference domain tools
     const domainItems = queue.items.filter((item) => item.toolId === "subfinder" || item.toolId === "dnsx" || item.toolId === "assetfinder");
+    expect(domainItems).toHaveLength(0);
     // At minimum, katana/nuclei-tech should be present for URL targets
     expect(queue.items.some((item) => item.toolId === "katana" || item.toolId === "nuclei-tech")).toBe(true);
     expect(queue.items.some((item) => item.fallbackFor === "browser-forms")).toBe(true);

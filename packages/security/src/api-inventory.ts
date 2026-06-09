@@ -87,7 +87,7 @@ function collectEndpointObservations(result: WebAppReconResult): EndpointObserva
   const observations: EndpointObservation[] = [];
   for (const item of result.apiInventory) {
     const parsed = safeUrl(item.url, result.startUrl);
-    if (!parsed) {
+    if (!parsed || !isSameOrigin(parsed, result.startUrl)) {
       continue;
     }
     observations.push({
@@ -102,7 +102,7 @@ function collectEndpointObservations(result: WebAppReconResult): EndpointObserva
   }
   for (const form of result.forms) {
     const parsed = safeUrl(form.action, result.startUrl);
-    if (!parsed) {
+    if (!parsed || !isSameOrigin(parsed, result.startUrl)) {
       continue;
     }
     observations.push({
@@ -117,7 +117,7 @@ function collectEndpointObservations(result: WebAppReconResult): EndpointObserva
   }
   for (const request of result.networkRequests) {
     const parsed = safeUrl(request.url, result.startUrl);
-    if (!parsed) {
+    if (!parsed || !isSameOrigin(parsed, result.startUrl)) {
       continue;
     }
     if (request.resourceType !== "xhr" && request.resourceType !== "fetch" && !isApiLikeObservationUrl(parsed)) {
@@ -137,7 +137,7 @@ function collectEndpointObservations(result: WebAppReconResult): EndpointObserva
   }
   for (const endpoint of result.jsEndpoints) {
     const parsed = safeUrl(endpoint.normalizedUrl ?? endpoint.value, result.startUrl);
-    if (!parsed) {
+    if (!parsed || !isSameOrigin(parsed, result.startUrl)) {
       continue;
     }
     observations.push({
@@ -159,7 +159,7 @@ function collectApiDescriptionObservations(result: WebAppReconResult): EndpointO
   for (const document of result.apiDescriptionDocuments ?? []) {
     if (document.kind === "graphql") {
       const parsed = safeUrl(document.url, result.startUrl);
-      if (!parsed) continue;
+      if (!parsed || !isSameOrigin(parsed, result.startUrl)) continue;
       observations.push({
         url: parsed.href,
         method: "POST",
@@ -197,9 +197,10 @@ function collectApiDescriptionObservations(result: WebAppReconResult): EndpointO
           .filter((value): value is string => Boolean(value));
         const bodyParamHints = requestBodyHints(spec, operationObject?.requestBody);
         const url = openApiOperationUrl(serverBase, path) ?? safeUrl(path, result.startUrl)?.href;
-        if (!url) continue;
+        const parsedUrl = url ? safeUrl(url, result.startUrl) : undefined;
+        if (!parsedUrl || !isSameOrigin(parsedUrl, result.startUrl)) continue;
         observations.push({
-          url,
+          url: parsedUrl.href,
           method: lowerMethod.toUpperCase(),
           source: "openapi",
           confidence: "high",
@@ -564,7 +565,7 @@ function normalizeUrlKey(value: string, baseUrl: string): string | undefined {
 
 function isAuthEndpointUrl(value: string, baseUrl: string): boolean {
   const parsed = safeUrl(value, baseUrl);
-  if (!parsed) {
+  if (!parsed || !isSameOrigin(parsed, baseUrl)) {
     return false;
   }
   const path = stripPathMatrixParameters(parsed.pathname);
@@ -577,6 +578,11 @@ function safeUrl(value: string, baseUrl: string): URL | undefined {
   } catch {
     return undefined;
   }
+}
+
+function isSameOrigin(parsed: URL, baseUrl: string): boolean {
+  const base = safeUrl(baseUrl, baseUrl);
+  return Boolean(base && parsed.origin === base.origin);
 }
 
 function decodeSegment(segment: string): string {

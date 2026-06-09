@@ -26,7 +26,7 @@ export function buildAuthSurfaceAssessment(result: WebAppReconResult): AuthSurfa
 
   return {
     login: loginPresent ? "present" : "not_observed",
-    registration: /(?:register|signup|sign-up|create-account|join)(?:\/|\?|$|[_-])/i.test(lowerCorpus) ? "present" : "not_observed",
+    registration: /(?:register|registration|signup|sign-up|create-account|join)(?:[./?#_-]|$)/i.test(lowerCorpus) ? "present" : "not_observed",
     passwordRecovery: /(?:forgot|reset|recover|recovery|password-reset|password\/reset)/i.test(lowerCorpus) ? "present" : "not_observed",
     oauthOrSso: /(?:oauth|openid|oidc|saml|sso|saml2|callback|authorize|authorization-code)/i.test(lowerCorpus) ? "present" : "not_observed",
     mfaOrCaptcha: /(?:mfa|2fa|otp|totp|captcha|recaptcha|hcaptcha|webauthn|passkey)/i.test(lowerCorpus) ? "present" : "not_observed",
@@ -190,7 +190,7 @@ function headerValue(headers: Record<string, string> | undefined, name: string):
 }
 
 function isAuthEndpoint(url: string): boolean {
-  return /\/(?:login|signin|logout|auth|session|token|oauth|sso|password|reset)(?:\/|\?|$)/i.test(authPath(url));
+  return /\/(?:login|signin|logout|register|registration|signup|auth|session|token|oauth|sso|password|reset)(?:[./?_-]|$)/i.test(authPath(url));
 }
 
 function authPath(value: string): string {

@@ -693,6 +693,7 @@ export type PayloadCandidate = {
     | "xxe"
     | "authz_object_reference"
     | "mass_assignment"
+    | "parser_header_injection"
     | "file_upload";
   title: string;
   risk: PayloadCandidateRisk;

@@ -10,6 +10,7 @@ data/*.sqlite-*
 third_party/security-tools/
 third_party/agentic-pentest/
 third_party/research/
+third_party/labs/
 tools/bin/
 tools/tmp/
 tools/templates/

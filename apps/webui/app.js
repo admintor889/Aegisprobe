@@ -525,11 +525,23 @@ function renderConversationWelcome() {
     <div class="welcome-card centered">
       <div class="welcome-badge">aegisprobe</div>
       <div>
-        <h3>输入自然语言任务</h3>
-        <p>Agent 会先理解你的目标，再把当前执行步骤实时同步到右侧流程与终端。</p>
+        <h3>Agent Console</h3>
+        <p>像使用 Codex CLI 一样输入任务。这里会显示对话流、工具调用、审批提示和安全验证证据。</p>
+        <div class="welcome-examples">
+          <button type="button" data-example="先识别这个目标的 Web 指纹，再给出可验证的利用路径">Web 指纹与利用路径</button>
+          <button type="button" data-example="复测最近失败的 Vulhub 靶场，必须拿到 shell 级证据">Vulhub shell 复测</button>
+          <button type="button" data-example="审查当前改动，优先找会导致误报或漏报的问题">代码审查</button>
+        </div>
       </div>
     </div>
   `;
+  dom.chat.querySelectorAll("[data-example]").forEach((button) => {
+    button.addEventListener("click", () => {
+      dom.input.value = button.dataset.example || "";
+      autoResizeComposer();
+      dom.input.focus();
+    });
+  });
 }
 
 function appendMessage({ role, content, time, meta = [], label = "" }) {
@@ -539,7 +551,7 @@ function appendMessage({ role, content, time, meta = [], label = "" }) {
   }
   const article = document.createElement("article");
   article.className = `message-card ${role}`;
-  const roleLabel = role === "user" ? "You" : role === "assistant" ? "aegisprobe" : (label || "system");
+  const roleLabel = role === "user" ? "You" : role === "assistant" ? "AegisProbe" : (label || "system");
   article.innerHTML = `
     <div class="message-avatar">${role === "user" ? "YOU" : role === "assistant" ? "AG" : "SYS"}</div>
     <div class="message-body">
@@ -550,6 +562,27 @@ function appendMessage({ role, content, time, meta = [], label = "" }) {
       <div class="message-text">${simpleMarkdown(content)}</div>
       ${meta.length ? `<div class="message-meta">${meta.map((item) => `<span class="meta-chip">${escapeHtml(item)}</span>`).join("")}</div>` : ""}
     </div>
+  `;
+  dom.chat.appendChild(article);
+  dom.chat.scrollTop = dom.chat.scrollHeight;
+}
+
+function appendToolCard({ content, time, meta = [], label = "tool" }) {
+  const text = String(content || "");
+  const tone = /blocked|失败|error|failed/i.test(text) ? "tool-error" : /完成|complete|done|success/i.test(text) ? "tool-done" : "tool-running";
+  const commandMatch = text.match(/`([^`]+)`/) || text.match(/启动工具:\s*(.+)$/m) || text.match(/工具完成:\s*(.+)$/m);
+  const command = commandMatch?.[1]?.trim();
+  const article = document.createElement("article");
+  article.className = "tool-card";
+  article.innerHTML = `
+    <div class="tool-card-head ${tone}">
+      <span class="tool-card-icon">${tone === "tool-error" ? "x" : tone === "tool-done" ? "✓" : ">"}</span>
+      <span class="tool-card-label">${escapeHtml(label || "tool")}</span>
+      <span class="tool-card-time">${formatTime(time)}</span>
+    </div>
+    ${command ? `<div class="tool-card-cmd">${escapeHtml(command)}</div>` : ""}
+    <div class="tool-card-summary">${simpleMarkdown(text)}</div>
+    ${meta.length ? `<div class="message-meta">${meta.map((item) => `<span class="meta-chip">${escapeHtml(item)}</span>`).join("")}</div>` : ""}
   `;
   dom.chat.appendChild(article);
   dom.chat.scrollTop = dom.chat.scrollHeight;
@@ -843,9 +876,9 @@ function setStatus(status, text, detail) {
 
 function initialTerminalLines(target = "") {
   return [
-    { tone: "info", text: "aegisprobe terminal ready" },
+    { tone: "info", text: "AegisProbe console ready" },
     { tone: "info", text: target ? `target> ${target}` : "target> waiting for session" },
-    { tone: "info", text: "awaiting tool execution..." },
+    { tone: "info", text: "sandbox> approval-gated tool execution" },
   ];
 }
 

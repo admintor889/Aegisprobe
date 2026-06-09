@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { resolve4, resolve6, resolveCname } from "node:dns/promises";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
+import { connect as netConnect } from "node:net";
 import { newId, nowIso, parseTargetInput, type SecurityAuthContext, type TargetInput, type TurnEventKind } from "@aegisprobe/shared";
 import type { AuditStore } from "@aegisprobe/storage";
 
@@ -53,6 +54,27 @@ export type HtmlFormSurface = {
   method: string;
   action: string;
   fields: Array<{ name: string; type?: string }>;
+};
+
+export type WebPortMatrixEntry = {
+  url: string;
+  host: string;
+  port: number;
+  scheme: "http" | "https";
+  tcp: "open" | "closed" | "timeout" | "error";
+  http: "response" | "silent" | "timeout" | "tls_error" | "connection_error" | "not_checked";
+  status?: number;
+  statusText?: string;
+  contentType?: string;
+  title?: string;
+  error?: string;
+  elapsedMs: number;
+};
+
+export type WebPortMatrixProbe = {
+  target: string;
+  entries: WebPortMatrixEntry[];
+  interpretation: string[];
 };
 
 type ExecuteSecurityProbeActionInput = {
@@ -149,6 +171,9 @@ export async function runBuiltInSecurityProbe(target: TargetInput, probe: Securi
       sections.push(await collectHttpLandingPageProbe(url));
     }
     sections.push(await collectHttpHeaderProbe(url));
+    if (probe === "basic_recon") {
+      sections.push(renderWebPortMatrixProbe(await collectWebPortMatrixProbe(url)));
+    }
   }
   return sections.join("\n\n");
 }
@@ -239,6 +264,202 @@ export async function collectHttpLandingPageProbe(url: string): Promise<string> 
   } finally {
     clearTimeout(timeout);
   }
+}
+
+export async function collectWebPortMatrixProbe(url: string): Promise<WebPortMatrixProbe> {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch (error) {
+    return {
+      target: url,
+      entries: [],
+      interpretation: [`web-port-matrix unavailable: ${error instanceof Error ? error.message : String(error)}`]
+    };
+  }
+
+  const host = parsed.hostname;
+  const targetPort = Number.parseInt(parsed.port || (parsed.protocol === "https:" ? "443" : "80"), 10);
+  const candidatePorts = uniqueNumbers([
+    targetPort,
+    parsed.protocol === "https:" ? 443 : 80,
+    443,
+    3000,
+    5000,
+    5050,
+    8000,
+    8080,
+    8443,
+    9090
+  ]).slice(0, 10);
+  const entries: WebPortMatrixEntry[] = [];
+  for (const port of candidatePorts) {
+    const scheme = schemeForMatrixProbe(parsed.protocol, targetPort, port);
+    const matrixUrl = `${scheme}://${formatHostForUrl(host)}:${port}/`;
+    entries.push(await collectWebPortMatrixEntry(matrixUrl, host, port, scheme));
+  }
+  return {
+    target: url,
+    entries,
+    interpretation: interpretWebPortMatrix(entries, targetPort)
+  };
+}
+
+function renderWebPortMatrixProbe(probe: WebPortMatrixProbe): string {
+  const lines = [`Web port/HTTP matrix for ${probe.target}`];
+  if (probe.entries.length === 0) {
+    lines.push("entries: (none)");
+  } else {
+    for (const entry of probe.entries) {
+      const parts = [
+        `${entry.scheme}:${entry.port}`,
+        `tcp=${entry.tcp}`,
+        `http=${entry.http}`,
+        entry.status ? `status=${entry.status} ${entry.statusText ?? ""}`.trim() : undefined,
+        entry.contentType ? `type=${entry.contentType}` : undefined,
+        entry.title ? `title=${entry.title}` : undefined,
+        entry.error ? `error=${entry.error}` : undefined,
+        `elapsed=${entry.elapsedMs}ms`
+      ].filter((part): part is string => Boolean(part));
+      lines.push(`- ${parts.join(" | ")}`);
+    }
+  }
+  if (probe.interpretation.length > 0) {
+    lines.push("interpretation:");
+    for (const item of probe.interpretation) {
+      lines.push(`- ${item}`);
+    }
+  }
+  return lines.join("\n");
+}
+
+async function collectWebPortMatrixEntry(
+  url: string,
+  host: string,
+  port: number,
+  scheme: "http" | "https"
+): Promise<WebPortMatrixEntry> {
+  const startedAt = Date.now();
+  const tcp = await probeTcp(host, port, 1_000);
+  if (tcp !== "open") {
+    return {
+      url,
+      host,
+      port,
+      scheme,
+      tcp,
+      http: "not_checked",
+      elapsedMs: Date.now() - startedAt
+    };
+  }
+  try {
+    const response = await safeHttpReadOnlyRequest(url, headersForAnonymousBaseline(), "GET", 8_192, 1_800);
+    const surface = extractHtmlSurface(url, response.body, response.headers["content-type"]);
+    return {
+      url,
+      host,
+      port,
+      scheme,
+      tcp,
+      http: "response",
+      status: response.status,
+      statusText: response.statusText,
+      contentType: response.headers["content-type"],
+      title: surface?.title,
+      elapsedMs: Date.now() - startedAt
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      url,
+      host,
+      port,
+      scheme,
+      tcp,
+      http: classifyHttpProbeError(message),
+      error: shortError(message),
+      elapsedMs: Date.now() - startedAt
+    };
+  }
+}
+
+async function probeTcp(host: string, port: number, timeoutMs: number): Promise<WebPortMatrixEntry["tcp"]> {
+  return await new Promise((resolvePromise) => {
+    let settled = false;
+    const finish = (value: WebPortMatrixEntry["tcp"]) => {
+      if (!settled) {
+        settled = true;
+        socket.destroy();
+        resolvePromise(value);
+      }
+    };
+    const socket = netConnect({ host, port });
+    socket.setTimeout(timeoutMs);
+    socket.once("connect", () => finish("open"));
+    socket.once("timeout", () => finish("timeout"));
+    socket.once("error", (error) => {
+      const code = typeof (error as Error & { code?: unknown }).code === "string"
+        ? (error as Error & { code: string }).code
+        : "";
+      finish(code === "ECONNREFUSED" || code === "EHOSTUNREACH" || code === "ENETUNREACH" ? "closed" : "error");
+    });
+  });
+}
+
+function interpretWebPortMatrix(entries: WebPortMatrixEntry[], targetPort: number): string[] {
+  const open = entries.filter((entry) => entry.tcp === "open");
+  const responses = open.filter((entry) => entry.http === "response");
+  const silent = open.filter((entry) => entry.http !== "response");
+  const interpretation: string[] = [];
+  if (responses.length > 0) {
+    interpretation.push(`HTTP response observed on ${responses.map((entry) => `${entry.scheme}:${entry.port}${entry.status ? `(${entry.status})` : ""}`).join(", ")}.`);
+  }
+  if (responses.some((entry) => entry.port !== targetPort)) {
+    interpretation.push("Responding non-target ports are same-host observations only; use them only when the assessment scope allows host-level service expansion beyond the target URL.");
+  }
+  if (open.length >= 4 && responses.length === 0) {
+    interpretation.push("Multiple TCP ports accepted connections but no HTTP response was observed; treat this as possible tarpit/all-open filtering or non-HTTP listeners before broad scanner escalation.");
+  } else if (silent.length > 0) {
+    interpretation.push(`TCP open but HTTP silent/error on ${silent.map((entry) => `${entry.scheme}:${entry.port}`).join(", ")}; validate protocol/banner before assuming a web app.`);
+  }
+  if (!entries.some((entry) => entry.port === targetPort && entry.http === "response") && responses.length > 0) {
+    interpretation.push(`Target port ${targetPort} did not return the clearest HTTP evidence; prefer the responding service URL for browser recon and payload draft context.`);
+  }
+  if (open.length === 0) {
+    interpretation.push("No candidate web port accepted a TCP connection in the short matrix probe.");
+  }
+  return interpretation;
+}
+
+function classifyHttpProbeError(message: string): WebPortMatrixEntry["http"] {
+  if (/timed out|timeout|aborted/i.test(message)) return "timeout";
+  if (/ssl|tls|wrong version number|certificate|EPROTO/i.test(message)) return "tls_error";
+  if (/socket hang up|empty reply|ECONNRESET|Parse Error/i.test(message)) return "silent";
+  return "connection_error";
+}
+
+function schemeForMatrixProbe(targetProtocol: string, targetPort: number, port: number): "http" | "https" {
+  if (port === targetPort && targetProtocol === "https:") return "https";
+  if (port === 443 || port === 8443) return "https";
+  return "http";
+}
+
+function formatHostForUrl(host: string): string {
+  return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+}
+
+function uniqueNumbers(values: number[]): number[] {
+  const out: number[] = [];
+  for (const value of values) {
+    if (Number.isFinite(value) && value > 0 && value <= 65_535 && !out.includes(value)) {
+      out.push(value);
+    }
+  }
+  return out;
+}
+
+function shortError(message: string): string {
+  return message.replace(/\s+/g, " ").slice(0, 180);
 }
 
 function firstCapture(input: string, pattern: RegExp): string | undefined {

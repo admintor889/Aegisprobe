@@ -37,6 +37,7 @@ export function buildPayloadCandidateSet(input: PayloadCandidateInput): PayloadC
   addCandidate(candidates, context, xxeCandidate(context));
   addCandidate(candidates, context, authzCandidate(context, input.authContexts ?? []));
   addCandidate(candidates, context, massAssignmentCandidate(context));
+  addCandidate(candidates, context, parserHeaderInjectionCandidate(context));
   addCandidate(candidates, context, fileUploadCandidate(context));
 
   const max = clamp(input.maxCandidates ?? 12, 1, 40);
@@ -98,7 +99,7 @@ export function renderPayloadCandidateSet(set: PayloadCandidateSet): string {
 function buildCandidateContext(input: PayloadCandidateInput): CandidateContext {
   const usefulEvidence = (input.evidence ?? []).filter(isConcretePayloadEvidence);
   const endpointValues = collectEndpoints(input.assets ?? [], usefulEvidence, input.target);
-  const insertionHints = collectInsertionHints(input.assets ?? [], usefulEvidence, input.authContexts ?? []);
+  const insertionHints = collectInsertionHints(input.assets ?? [], usefulEvidence, input.authContexts ?? [], input.target);
   const usefulAssets = (input.assets ?? []).filter((asset) => {
     if (asset.kind !== "url" && !/https?:\/\//i.test(asset.value) && !asset.value.startsWith("/")) return true;
     const metadata = parseMetadata(asset.metadata);
@@ -161,14 +162,15 @@ function collectEndpoints(assets: SecurityAsset[], evidence: SecurityEvidence[],
 function collectInsertionHints(
   assets: SecurityAsset[],
   evidence: SecurityEvidence[],
-  authContexts: SecurityAuthContext[]
+  authContexts: SecurityAuthContext[],
+  target?: TargetInput
 ): PayloadInsertionHint[] {
   const hints: PayloadInsertionHint[] = [];
   for (const asset of assets) {
     if (asset.kind !== "url" && !/https?:\/\//i.test(asset.value) && !asset.value.startsWith("/")) continue;
     const metadata = parseMetadata(asset.metadata);
     const method = stringValue(metadata?.method);
-    const endpoint = normalizePayloadEndpoint(asset.value);
+    const endpoint = normalizePayloadEndpoint(asset.value, target?.normalized);
     if (!endpoint) continue;
     const riskSignals = uniqueStrings([...arrayOfStrings(metadata?.riskSignals), ...routeRiskSignals(endpoint)]);
     if (!isUsefulPayloadEndpoint(endpoint, riskSignals)) continue;
@@ -187,6 +189,9 @@ function collectInsertionHints(
     if (/upload|multipart|attachment|avatar|import/i.test(`${endpoint} ${asset.source} ${JSON.stringify(metadata ?? {})}`)) {
       hints.push({ endpoint, method, location: "upload", name: "file", riskSignals, evidenceRefs: [asset.id] });
     }
+    if (/content-?type|multipart|boundary|parser|ognl|expression|struts|file-handling|upload/i.test(`${endpoint} ${asset.source} ${JSON.stringify(metadata ?? {})} ${riskSignals.join(" ")}`)) {
+      hints.push({ endpoint, method, location: "header", name: "Content-Type", riskSignals, evidenceRefs: [asset.id] });
+    }
   }
 
   const requestLinePattern = /\b(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+([^\s"'<>]+)/gi;
@@ -194,7 +199,7 @@ function collectInsertionHints(
     const raw = typeof item.data === "string" ? item.data : JSON.stringify(item.data ?? "");
     for (const match of raw.matchAll(requestLinePattern)) {
       const method = match[1]?.toUpperCase();
-      const endpoint = normalizeRequestLineEndpoint(match[2] ?? "");
+      const endpoint = normalizeRequestLineEndpoint(match[2] ?? "", target?.normalized);
       if (!endpoint) continue;
       const riskSignals = routeRiskSignals(endpoint);
       if (!isUsefulPayloadEndpoint(endpoint, riskSignals)) continue;
@@ -206,6 +211,9 @@ function collectInsertionHints(
       }
       if (/upload|multipart|attachment|avatar|import/i.test(endpoint)) {
         hints.push({ endpoint, method, location: "upload", name: "file", riskSignals, evidenceRefs: [item.id] });
+      }
+      if (/content-?type|multipart|boundary|parser|ognl|expression|struts|file-handling|upload/i.test(`${endpoint} ${raw}`)) {
+        hints.push({ endpoint, method, location: "header", name: "Content-Type", riskSignals, evidenceRefs: [item.id] });
       }
     }
   }
@@ -252,7 +260,7 @@ function sqlInjectionCandidate(context: CandidateContext): PayloadCandidate | un
 }
 
 function sstiCandidate(context: CandidateContext): PayloadCandidate | undefined {
-  if (!hasAny(context, ["template=", "/template", "flask", "jinja", "twig", "freemarker", "velocity", "erb", "handlebars", "mustache", "render", "greeting"])) return undefined;
+  if (!hasSstiEvidence(context)) return undefined;
   if (!hasConcreteCategorySurface(context, "ssti")) return undefined;
   return candidate("pc-ssti", "ssti", "Server-side template expression probes", "medium", context, {
     payloads: ["{{7*7}}", "${7*7}", "#{7*7}", "<%= 7*7 %>"],
@@ -334,6 +342,22 @@ function massAssignmentCandidate(context: CandidateContext): PayloadCandidate | 
   });
 }
 
+function parserHeaderInjectionCandidate(context: CandidateContext): PayloadCandidate | undefined {
+  if (!hasParserHeaderInjectionEvidence(context)) return undefined;
+  if (!hasConcreteCategorySurface(context, "parser_header_injection")) return undefined;
+  return candidate("pc-parser-header-injection", "parser_header_injection", "Parser and header expression probes", "high", context, {
+    payloads: [
+      "Content-Type parser marker expression",
+      "content-type variation + benign marker header",
+      "multipart boundary/parser error comparison"
+    ],
+    prerequisites: ["A request parser, multipart upload, content-type dependent route, or framework expression parser is evidenced."],
+    expectedObservations: ["A marker header/body value, parser-specific error, or consistent baseline/probe response difference is observed."],
+    falsePositiveGuards: ["Compare with a valid baseline content type and a malformed non-expression content type.", "Use non-destructive markers before command execution or file effects."],
+    notes: ["Expression-to-command escalation is high risk and requires explicit active authorization."]
+  });
+}
+
 function fileUploadCandidate(context: CandidateContext): PayloadCandidate | undefined {
   if (!hasAny(context, ["upload", "multipart", "filename", "avatar", "attachment", "import file"])) return undefined;
   if (!hasConcreteCategorySurface(context, "file_upload")) return undefined;
@@ -378,6 +402,7 @@ function targetHintsFor(context: CandidateContext, category: PayloadCandidate["c
     xxe: /\/(?:xml|soap|saml|upload|import)/i,
     authz_object_reference: /\/(?:api\/)?(?:users|orders|tenants|admin|accounts)\/[A-Za-z0-9_-]+/i,
     mass_assignment: /\/(?:api\/)?(?:users|profile|settings|accounts)\/?/i,
+    parser_header_injection: /\/(?:upload|import|file|files|doUpload|action)(?:\/|\?|$)|\.action(?:\?|$)/i,
     file_upload: /\/(?:upload|avatar|attachment|import|files)/i
   };
   const regex = keywords[category];
@@ -392,8 +417,15 @@ function targetHintsFor(context: CandidateContext, category: PayloadCandidate["c
 
 function insertionHintsFor(context: CandidateContext, category: PayloadCandidate["category"]): PayloadInsertionHint[] {
   const matched = context.insertionHints.filter((hint) => insertionHintMatchesCategory(hint, category));
-  if (category === "authz_object_reference") return matched.slice(0, 8);
-  return (matched.length > 0 ? matched : allowGenericInsertionFallback(category) ? context.insertionHints : []).slice(0, 8);
+  const selected = category === "authz_object_reference"
+    ? matched
+    : matched.length > 0
+      ? matched
+      : allowGenericInsertionFallback(category) ? context.insertionHints : [];
+  return selected
+    .slice()
+    .sort((left, right) => insertionHintScore(right, category) - insertionHintScore(left, category))
+    .slice(0, 8);
 }
 
 function hasConcreteCategorySurface(context: CandidateContext, category: PayloadCandidate["category"]): boolean {
@@ -425,12 +457,62 @@ function insertionHintMatchesCategory(hint: PayloadInsertionHint, category: Payl
       && /\b(?:role|is_?admin|admin|permission|permissions|tenant_?id|tenant|account_?id|account|profile)\b/.test(combined)
       && !/\b(?:username|password|submit|csrf|token)\b/.test(name);
   }
+  if (category === "parser_header_injection") {
+    if (hint.location === "header" && /content-type|accept|x-|header/.test(name)) return true;
+    return /content-?type|multipart|boundary|parser|ognl|expression|struts|action|upload|file-handling|state-changing-method/.test(combined);
+  }
   if (category === "file_upload") return hint.location === "upload" || /upload|file|avatar|attachment|import/.test(combined);
   if (category === "path_traversal") return /file|path|page|template|download|include|export/.test(combined);
   if (category === "ssrf") return /url|uri|callback|webhook|redirect|avatar|import|proxy|fetch/.test(combined);
   if (category === "command_injection") return /host|ip|domain|cmd|command|lookup|ping|convert|diagnostic/.test(combined);
   if (category === "xxe") return /xml|soap|saml|svg|docx|xlsx|upload|import/.test(combined) || hint.location === "body";
+  if (category === "sql_injection") {
+    if (/csrf|xsrf|token|nonce|submit|^login$/i.test(name)) return false;
+    return ["query", "body", "path"].includes(hint.location)
+      && (/\b(?:id|user|username|email|password|q|search|filter|sort|order)\b/.test(name)
+        || /sqli|sql|database|query|\/(?:login|search|users?|orders?)(?:\/|\?|$)/i.test(endpoint));
+  }
+  if (category === "xss_reflection") {
+    if (/csrf|xsrf|token|nonce|submit|^login$/i.test(name)) return false;
+    return ["query", "body", "path"].includes(hint.location);
+  }
   return hint.location === "query" || hint.location === "body" || hint.location === "path";
+}
+
+function insertionHintScore(hint: PayloadInsertionHint, category: PayloadCandidate["category"]): number {
+  const name = hint.name?.toLowerCase() ?? "";
+  const endpoint = hint.endpoint.toLowerCase();
+  const combined = `${name} ${endpoint} ${hint.riskSignals.join(" ").toLowerCase()}`;
+  let score = 0;
+  if (hint.location === "query" || hint.location === "body") score += 8;
+  if (/\/(?:api|rest|graphql|vulnerabilities|admin|users?|orders?|search|login)(?:\/|\?|$)/i.test(endpoint)) score += 4;
+  if (/csrf|xsrf|token|nonce|submit|login$|^login$/i.test(name)) score -= 8;
+
+  if (category === "sql_injection") {
+    if (/sqli|sql|database|query/.test(combined)) score += 24;
+    if (/\b(?:id|user|username|email|password|q|search|filter|sort|order)\b/.test(name)) score += 12;
+    if (/\/(?:login|search|users?|orders?)(?:\/|\?|$)/i.test(endpoint)) score += 6;
+  }
+  if (category === "xss_reflection") {
+    if (/\b(?:q|query|search|name|message|comment|title|redirect|next)\b/.test(name)) score += 12;
+    if (/\/(?:search|comment|profile|message)(?:\/|\?|$)/i.test(endpoint)) score += 6;
+  }
+  if (category === "authz_object_reference") {
+    if (hint.location === "auth_context") score += 12;
+    if (hint.location === "path") score += 8;
+    if (/admin|tenant|owner|order|account|user|object|id|uuid/.test(combined)) score += 10;
+  }
+  if (category === "mass_assignment" && /\b(?:role|isadmin|admin|permission|tenant|account|profile)\b/.test(name)) score += 18;
+  if (category === "parser_header_injection") {
+    if (hint.location === "header") score += 22;
+    if (/content-?type|multipart|boundary|parser|ognl|expression|struts/.test(combined)) score += 18;
+    if (/upload|file-handling|\.action|state-changing-method/.test(combined)) score += 8;
+  }
+  if (category === "path_traversal" && /\b(?:file|path|page|template|download|include|export)\b/.test(name)) score += 18;
+  if (category === "ssrf" && /\b(?:url|uri|callback|webhook|redirect|avatar|proxy|fetch)\b/.test(name)) score += 18;
+  if (category === "command_injection" && /\b(?:host|ip|domain|cmd|command|lookup|ping)\b/.test(name)) score += 18;
+  if (category === "file_upload" && hint.location === "upload") score += 20;
+  return score;
 }
 
 function candidateMatchesFocus(candidate: PayloadCandidate, focus: string): boolean {
@@ -448,6 +530,7 @@ const focusAliases: Partial<Record<PayloadCandidate["category"], string[]>> = {
   xss_reflection: ["xss", "reflection"],
   authz_object_reference: ["authz", "authorization", "idor", "bola", "bfla", "object reference"],
   mass_assignment: ["mass assignment", "overposting"],
+  parser_header_injection: ["parser", "header injection", "content-type", "ognl", "expression injection"],
   command_injection: ["rce", "command injection", "os command"],
   path_traversal: ["lfi", "traversal", "file read"],
   file_upload: ["upload"],
@@ -458,6 +541,34 @@ const focusAliases: Partial<Record<PayloadCandidate["category"], string[]>> = {
 
 function hasAny(context: CandidateContext, terms: string[]): boolean {
   return terms.some((term) => context.corpus.includes(term.toLowerCase()));
+}
+
+function hasSstiEvidence(context: CandidateContext): boolean {
+  if (hasAny(context, [
+    "template=", "/template", "template engine", "server-side template", "ssti",
+    "flask", "jinja", "django", "werkzeug", "gunicorn", "uwsgi",
+    "twig", "freemarker", "velocity", "thymeleaf", "erb", "rails",
+    "handlebars", "mustache", "nunjucks", "ejs", "pug", "render", "greeting"
+  ])) {
+    return true;
+  }
+  const hasServerRenderedHtml = hasAny(context, ["content-type: text/html", "text/html;", "server:"]);
+  if (!hasServerRenderedHtml) return false;
+  return context.insertionHints.some((hint) => {
+    if (hint.location !== "query" && hint.location !== "body" && hint.location !== "path") return false;
+    const name = hint.name?.toLowerCase() ?? "";
+    const endpoint = hint.endpoint.toLowerCase();
+    return /\b(?:name|message|q|query|search|title|text|template|view|page|greet|content)\b/.test(name)
+      || /[?&](?:name|message|q|query|search|title|text|template|view|page|greet|content)=/.test(endpoint)
+      || /\/(?:greet|render|template|message|search)(?:\/|\?|$)/.test(endpoint);
+  });
+}
+
+function hasParserHeaderInjectionEvidence(context: CandidateContext): boolean {
+  return hasAny(context, [
+    "content-type", "multipart", "boundary", "parser", "expression", "ognl",
+    "struts", "opensymphony", "xwork", ".action", "file-handling", "upload"
+  ]);
 }
 
 function hasAuthorizationBoundaryEvidence(context: CandidateContext, authContexts: SecurityAuthContext[]): boolean {
@@ -517,7 +628,12 @@ function pathObjectNames(endpoint: string, pathTemplate?: string): string[] {
       if (match[1]) names.add(match[1]);
     }
   }
-  const path = endpoint.split("?")[0] ?? endpoint;
+  let path = endpoint.split("?")[0] ?? endpoint;
+  try {
+    path = new URL(endpoint).pathname;
+  } catch {
+    // Keep relative paths as-is.
+  }
   if (/[/:][0-9]{2,}(?:\/|$)/.test(path)) names.add("numeric-id");
   if (/[/:][0-9a-f]{8}-[0-9a-f-]{18,}/i.test(path)) names.add("uuid");
   if (/\/(?:users|orders|accounts|tenants|invoices|files|admin)\/[^/?#]+/i.test(path)) names.add("object-reference");
@@ -531,14 +647,19 @@ function normalizePayloadEndpoint(value: string, base?: string): string | undefi
   if (looksLikeExpressionOrTextArtifact(decodeURIComponentSafe(trimmed))) return undefined;
   if (trimmed.startsWith("/") && !base) return trimmed;
   try {
-    return new URL(trimmed, base).toString();
+    const parsed = new URL(trimmed, base);
+    if (base) {
+      const baseUrl = new URL(base);
+      if (parsed.origin !== baseUrl.origin) return undefined;
+    }
+    return parsed.toString();
   } catch {
-    return trimmed;
+    return base ? undefined : trimmed;
   }
 }
 
-function normalizeRequestLineEndpoint(value: string): string | undefined {
-  const endpoint = normalizePayloadEndpoint(value);
+function normalizeRequestLineEndpoint(value: string, base?: string): string | undefined {
+  const endpoint = normalizePayloadEndpoint(value, base);
   if (!endpoint) return undefined;
   if (looksLikeExpressionOrTextArtifact(endpoint)) return undefined;
   return endpoint;

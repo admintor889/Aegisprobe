@@ -229,6 +229,58 @@ function Get-ServiceCommandArgs($Value) {
   return @([string]$Value)
 }
 
+function Test-TcpPortAvailable([string]$HostIp, [int]$Port) {
+  $listener = $null
+  try {
+    $address = [System.Net.IPAddress]::Parse($HostIp)
+    $listener = [System.Net.Sockets.TcpListener]::new($address, $Port)
+    $listener.Start()
+    return $true
+  } catch {
+    return $false
+  } finally {
+    if ($listener) { $listener.Stop() }
+  }
+}
+
+function Get-AvailableTcpPort([string]$HostIp) {
+  $listener = $null
+  try {
+    $address = [System.Net.IPAddress]::Parse($HostIp)
+    $listener = [System.Net.Sockets.TcpListener]::new($address, 0)
+    $listener.Start()
+    return [int]$listener.LocalEndpoint.Port
+  } finally {
+    if ($listener) { $listener.Stop() }
+  }
+}
+
+function Resolve-ServicePortMappings($Service) {
+  $mappings = @()
+  foreach ($port in @($Service.ports)) {
+    if ($port.protocol -and $port.protocol -ne "tcp") { continue }
+    $target = [string]$port.target
+    if (-not $target) { continue }
+    $hostIp = if ($port.host_ip) { [string]$port.host_ip } else { "127.0.0.1" }
+    $originalPublished = if ($port.published) { [int]$port.published } else { 0 }
+    $published = $originalPublished
+    $remapped = $false
+    if ($published -le 0 -or -not (Test-TcpPortAvailable $hostIp $published)) {
+      $published = Get-AvailableTcpPort $hostIp
+      $remapped = $true
+    }
+    $mappings += [pscustomobject]@{
+      HostIp = $hostIp
+      Published = [int]$published
+      OriginalPublished = [int]$originalPublished
+      Target = [int]$target
+      Protocol = "tcp"
+      Remapped = [bool]$remapped
+    }
+  }
+  return $mappings
+}
+
 function New-DockerRunNetwork([string]$NetworkName, [string]$ComposeDir, [string]$LogFile) {
   $networkCode = Run-LoggedCommand -File "docker" -CommandArgs @("network", "create", $NetworkName) -WorkDir $ComposeDir -LogFile $LogFile -TimeoutSeconds 30
   if ($networkCode -eq 0) {
@@ -285,7 +337,7 @@ function Get-ComposeServiceStartOrder($Config) {
   return $ordered
 }
 
-function Add-ServiceDockerRunArgs([string[]]$RunArgs, $Service, [string]$NetworkName, [string]$ServiceName) {
+function Add-ServiceDockerRunArgs([string[]]$RunArgs, $Service, [string]$NetworkName, [string]$ServiceName, [object[]]$PortMappings = @()) {
   $output = @($RunArgs)
   if ($NetworkName) {
     $output += @("--network", $NetworkName, "--network-alias", $ServiceName)
@@ -300,13 +352,9 @@ function Add-ServiceDockerRunArgs([string[]]$RunArgs, $Service, [string]$Network
       $output += @("--entrypoint", $entrypointArgs[0])
     }
   }
-  foreach ($port in @($Service.ports)) {
-    if ($port.protocol -and $port.protocol -ne "tcp") { continue }
-    $published = [string]$port.published
-    $target = [string]$port.target
-    if (-not $published -or -not $target) { continue }
-    $hostIp = if ($port.host_ip) { [string]$port.host_ip } else { "127.0.0.1" }
-    $output += @("-p", "${hostIp}:${published}:${target}")
+  $effectiveMappings = if ($PortMappings.Count -gt 0) { @($PortMappings) } else { @(Resolve-ServicePortMappings $Service) }
+  foreach ($mapping in @($effectiveMappings)) {
+    $output += @("-p", "$($mapping.HostIp):$($mapping.Published):$($mapping.Target)")
   }
   foreach ($volume in @($Service.volumes)) {
     if ($volume.type -eq "bind" -and $volume.source -and $volume.target) {
@@ -327,7 +375,11 @@ function Start-SingleServiceWithDockerRun([string]$ComposeDir, [string]$Relative
   $containerName = "aegisprobe-vulhub-$safe"
   Run-LoggedCommand -File "docker" -CommandArgs @("rm", "-f", $containerName) -WorkDir $ComposeDir -LogFile $LogFile -TimeoutSeconds 30 | Out-Null
 
-  $runArgs = Add-ServiceDockerRunArgs -RunArgs @("run", "-d", "--name", $containerName) -Service $single.Service -NetworkName "" -ServiceName $single.Name
+  $portMappings = @(Resolve-ServicePortMappings $single.Service)
+  foreach ($mapping in @($portMappings | Where-Object Remapped)) {
+    Add-Content -LiteralPath $LogFile -Value "PORT REMAP: service=$($single.Name) target=$($mapping.Target) requested=$($mapping.OriginalPublished) assigned=$($mapping.Published)"
+  }
+  $runArgs = Add-ServiceDockerRunArgs -RunArgs @("run", "-d", "--name", $containerName) -Service $single.Service -NetworkName "" -ServiceName $single.Name -PortMappings $portMappings
   $runArgs += [string]$single.Service.image
   $runArgs += Get-ServiceCommandArgs $single.Service.command
   $code = Run-LoggedCommand -File "docker" -CommandArgs $runArgs -WorkDir $ComposeDir -LogFile $LogFile -TimeoutSeconds 180
@@ -336,16 +388,13 @@ function Start-SingleServiceWithDockerRun([string]$ComposeDir, [string]$Relative
   }
 
   $publishers = @()
-  foreach ($port in @($single.Service.ports)) {
-    if ($port.protocol -and $port.protocol -ne "tcp") { continue }
-    if ($port.published -and $port.target) {
-      $publishers += [pscustomobject]@{
-        Service = $single.Name
-        Image = [string]$single.Service.image
-        Host = if ($port.host_ip) { [string]$port.host_ip } else { "127.0.0.1" }
-        Port = [int]$port.published
-        TargetPort = [int]$port.target
-      }
+  foreach ($mapping in @($portMappings)) {
+    $publishers += [pscustomobject]@{
+      Service = $single.Name
+      Image = [string]$single.Service.image
+      Host = [string]$mapping.HostIp
+      Port = [int]$mapping.Published
+      TargetPort = [int]$mapping.Target
     }
   }
 
@@ -390,7 +439,11 @@ function Start-MultiServiceWithDockerRun([string]$ComposeDir, [string]$RelativeN
       return $null
     }
     $containerName = "aegisprobe-vulhub-$shortSafe-$serviceName"
-    $runArgs = Add-ServiceDockerRunArgs -RunArgs @("run", "-d", "--name", $containerName) -Service $service -NetworkName $networkName -ServiceName $serviceName
+    $portMappings = @(Resolve-ServicePortMappings $service)
+    foreach ($mapping in @($portMappings | Where-Object Remapped)) {
+      Add-Content -LiteralPath $LogFile -Value "PORT REMAP: service=$serviceName target=$($mapping.Target) requested=$($mapping.OriginalPublished) assigned=$($mapping.Published)"
+    }
+    $runArgs = Add-ServiceDockerRunArgs -RunArgs @("run", "-d", "--name", $containerName) -Service $service -NetworkName $networkName -ServiceName $serviceName -PortMappings $portMappings
     $runArgs += [string]$service.image
     $runArgs += Get-ServiceCommandArgs $service.command
     $code = Run-LoggedCommand -File "docker" -CommandArgs $runArgs -WorkDir $ComposeDir -LogFile $LogFile -TimeoutSeconds 180
@@ -403,16 +456,13 @@ function Start-MultiServiceWithDockerRun([string]$ComposeDir, [string]$RelativeN
     }
     $startedContainers += $containerName
     $images += [string]$service.image
-    foreach ($port in @($service.ports)) {
-      if ($port.protocol -and $port.protocol -ne "tcp") { continue }
-      if ($port.published -and $port.target) {
-        $publishers += [pscustomobject]@{
-          Service = $serviceName
-          Image = [string]$service.image
-          Host = if ($port.host_ip) { [string]$port.host_ip } else { "127.0.0.1" }
-          Port = [int]$port.published
-          TargetPort = [int]$port.target
-        }
+    foreach ($mapping in @($portMappings)) {
+      $publishers += [pscustomobject]@{
+        Service = $serviceName
+        Image = [string]$service.image
+        Host = [string]$mapping.HostIp
+        Port = [int]$mapping.Published
+        TargetPort = [int]$mapping.Target
       }
     }
   }

@@ -24,9 +24,7 @@ export function buildPayloadRequestDraftSet(input: PayloadRequestDraftInput): Pa
     addDraftsForCandidate(drafts, candidate, context);
   }
   const maxDrafts = clamp(input.maxDrafts ?? 12, 1, 60);
-  const selected = drafts
-    .sort((left, right) => draftScore(right) - draftScore(left))
-    .slice(0, maxDrafts)
+  const selected = selectDiverseDrafts(drafts.sort((left, right) => draftScore(right) - draftScore(left)), maxDrafts)
     .map((draft, index) => ({ ...draft, id: `pdr-${index + 1}-${draft.candidateId}` }));
 
   return {
@@ -155,6 +153,7 @@ function buildDraft(
 function canDraftForInsertion(candidate: PayloadCandidate, insertion: PayloadInsertionHint): boolean {
   if (insertion.location === "auth_context") return candidate.category === "authz_object_reference";
   if (insertion.location === "upload") return candidate.category === "file_upload";
+  if (insertion.location === "header") return candidate.category === "parser_header_injection";
   if (insertion.location === "body") return ["mass_assignment", "command_injection", "ssti", "sql_injection", "xxe", "xss_reflection"].includes(candidate.category);
   if (insertion.location === "path") return ["authz_object_reference", "path_traversal", "ssti", "sql_injection", "xss_reflection"].includes(candidate.category);
   if (insertion.location === "query") return true;
@@ -210,6 +209,7 @@ function buildRequestPreview(
 function needsApproval(candidate: PayloadCandidate, method: string, insertion: PayloadInsertionHint, activeAllowed: boolean): boolean {
   const stateChanging = !["GET", "HEAD"].includes(method);
   if (stateChanging || insertion.location === "body" || insertion.location === "upload") return true;
+  if (insertion.location === "header") return true;
   if (candidate.risk === "high") return true;
   if (candidate.requiresApproval && !activeAllowed) return true;
   return false;
@@ -308,11 +308,37 @@ function draftScore(draft: PayloadRequestDraft): number {
   if (draft.recommendedTool === "http_get") score += 20;
   if (!draft.requiresApproval) score += 15;
   if (draft.category === "authz_object_reference") score += 10;
+  if (draft.category === "sql_injection" && /sqli|sql|\/login|\/search|[?&](?:id|q|search|user)=/i.test(`${draft.url} ${draft.insertion.endpoint}`)) score += 14;
+  if (draft.category === "sql_injection" && /\b(?:id|user|username|email|password|q|search|filter|sort|order)\b/i.test(draft.insertion.name ?? "")) score += 8;
   if (draft.insertion.location === "query" || draft.insertion.location === "path") score += 8;
   if (draft.bodyPreview) score += 4;
   if (draft.risk === "low") score += 6;
   if (draft.risk === "medium") score += 3;
+  if (/csrf|xsrf|token|nonce|submit|^login$/i.test(draft.insertion.name ?? "")) score -= 8;
   return score;
+}
+
+function selectDiverseDrafts(drafts: PayloadRequestDraft[], maxDrafts: number): PayloadRequestDraft[] {
+  const selected: PayloadRequestDraft[] = [];
+  const seenInsertion = new Set<string>();
+  for (const draft of drafts) {
+    const key = draftDiversityKey(draft);
+    if (seenInsertion.has(key)) continue;
+    selected.push(draft);
+    seenInsertion.add(key);
+    if (selected.length >= maxDrafts) return selected;
+  }
+  return selected;
+}
+
+function draftDiversityKey(draft: PayloadRequestDraft): string {
+  return [
+    draft.category,
+    draft.method,
+    draft.insertion.endpoint,
+    draft.insertion.location,
+    draft.insertion.name ?? ""
+  ].join("\u0000");
 }
 
 function clamp(value: number, min: number, max: number): number {

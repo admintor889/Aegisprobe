@@ -5,6 +5,7 @@ param(
   [int]$AgentTimeoutSeconds = 180,
   [switch]$SmokeActiveProof,
   [switch]$AllowPull,
+  [switch]$RemoveImages,
   [switch]$ContinueOnFailure
 )
 
@@ -43,6 +44,9 @@ function Summarize-SmokeReport($Record) {
   return [ordered]@{
     passed = [bool]$report.passed
     proof = $report.proof.status
+    proofLevel = $report.proof.level
+    capability = $report.proof.capability
+    serviceCompromised = [bool]$report.serviceCompromised
     validatedFindings = @($report.storageSummary.findings | Where-Object state -eq "validated").Count
     firstQueueAfter = $report.queue.after[0].title
     failedAssertions = @($report.assertions | Where-Object { -not $_.passed } | ForEach-Object name)
@@ -53,7 +57,12 @@ $repoRoot = (Resolve-Path -LiteralPath ".").Path
 $allCases = @(Read-SmokeCases $Cases)
 if ($CaseId.Count -gt 0) {
   $wanted = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-  foreach ($id in $CaseId) { [void]$wanted.Add($id) }
+  foreach ($id in $CaseId) {
+    foreach ($part in ([string]$id -split ",")) {
+      $trimmed = $part.Trim()
+      if ($trimmed) { [void]$wanted.Add($trimmed) }
+    }
+  }
   $allCases = @($allCases | Where-Object { $wanted.Contains([string]$_.id) })
 }
 
@@ -110,6 +119,9 @@ foreach ($case in $allCases) {
   }
   if ($SmokeActiveProof) {
     $args += "-SmokeActiveProof"
+  }
+  if ($RemoveImages) {
+    $args += "-RemoveImages"
   }
   & powershell @args
   $exitCode = $LASTEXITCODE
