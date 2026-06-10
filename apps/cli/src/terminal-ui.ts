@@ -146,21 +146,203 @@ class MarkdownTerminalRenderer {
   private renderCodeBlock(language: string, lines: string[]): string[] {
     if (lines.length === 0) return [];
     const innerWidth = Math.max(20, this.width - 4);
+    const highlighter = pickHighlighter(language);
     const output: string[] = [];
     // top border with language tag
     const langTag = language ? ` ${language} ` : "";
-    const topLeft = `${CODE_BORDER} ${faint(langTag)}${"─".repeat(Math.max(0, innerWidth - langTag.length - 2))}${RESET}`;
+    const topLeft = `${CODE_BORDER} ${label(langTag)}${"─".repeat(Math.max(0, innerWidth - langTag.length - 2))}${RESET}`;
     output.push(topLeft);
-    // code lines with background
+    // code lines with background + syntax highlighting
     for (const codeLine of lines) {
-      const clipped = takeDisplayPrefix(codeLine, innerWidth);
-      output.push(`${CODE_BG} ${faint(clipped)}${" ".repeat(Math.max(0, innerWidth - displayWidth(clipped) - 1))}${RESET}`);
+      const highlighted = highlighter(codeLine);
+      const clipped = takeDisplayPrefix(highlighted, innerWidth);
+      const raw = codeLine; // for accurate width calc
+      const rawClipped = takeDisplayPrefix(raw, innerWidth);
+      const padding = Math.max(0, innerWidth - displayWidth(rawClipped) - 1);
+      output.push(`${CODE_BG} ${clipped}${" ".repeat(padding)}${RESET}`);
     }
     // bottom border
     const bottom = `${CODE_BORDER}${"─".repeat(innerWidth + 1)}${RESET}`;
     output.push(bottom);
     return output;
   }
+}
+
+// ── Syntax highlighting ──
+
+type Token = { text: string; color: (s: string) => string };
+type Highlighter = (line: string) => string;
+
+// Token colors
+const KEYWORD  = (s: string) => style(s, "blue");
+const STRING   = (s: string) => style(s, "green");
+const COMMENT  = (s: string) => style(s, "gray");
+const NUMBER   = (s: string) => style(s, "yellow");
+const OPERATOR = (s: string) => style(s, "cyan");
+const BUILTIN  = (s: string) => style(s, "magenta");
+const TYPE     = (s: string) => style(s, "cyan");
+
+/** Match a token at the start of a string. Returns [matched, text] or null. */
+type TokenMatcher = (src: string) => [string, (s: string) => string] | null;
+
+function tokenize(line: string, matchers: TokenMatcher[]): string {
+  let result = "";
+  let remaining = line;
+  while (remaining.length > 0) {
+    let matched = false;
+    for (const m of matchers) {
+      const hit = m(remaining);
+      if (hit) {
+        const [raw, color] = hit;
+        result += color(raw);
+        remaining = remaining.slice(raw.length);
+        matched = true;
+        break;
+      }
+    }
+    if (!matched) {
+      result += remaining[0]!;
+      remaining = remaining.slice(1);
+    }
+  }
+  return result;
+}
+
+// ── Per-language matcher sets ──
+
+const shellMatchers: TokenMatcher[] = [
+  // single-quoted string
+  (s) => { const m = s.match(/^'[^']*'/); return m ? [m[0], STRING] : null; },
+  // double-quoted string
+  (s) => { const m = s.match(/^"[^"]*"/); return m ? [m[0], STRING] : null; },
+  // comment
+  (s) => { const m = s.match(/^#.*/); return m ? [m[0], COMMENT] : null; },
+  // keyword
+  (s) => { const m = s.match(/^(if|then|else|elif|fi|for|while|do|done|case|esac|in|function|return|local|export|unset|set|source|shift|break|continue|exit|trap|exec|eval)(?=\b|[^a-zA-Z0-9_])/); return m ? [m[0], KEYWORD] : null; },
+  // flag/option
+  (s) => { const m = s.match(/^--?[a-zA-Z][a-zA-Z0-9-]*/); return m ? [m[0], BUILTIN] : null; },
+  // variable
+  (s) => { const m = s.match(/^\$[a-zA-Z_][a-zA-Z0-9_]*|\$\{[^}]+\}/); return m ? [m[0], TYPE] : null; },
+  // number
+  (s) => { const m = s.match(/^\b\d+(?:\.\d+)?\b/); return m ? [m[0], NUMBER] : null; },
+  // operator/pipe
+  (s) => { const m = s.match(/^[|&<>;]{1,2}/); return m ? [m[0], OPERATOR] : null; },
+];
+
+const pythonMatchers: TokenMatcher[] = [
+  // string (single-quoted)
+  (s) => { const m = s.match(/^'''[^]*?'''|^"""[^]*?"""|^'[^']*'|^"[^"]*"/); return m ? [m[0], STRING] : null; },
+  // comment
+  (s) => { const m = s.match(/^#.*/); return m ? [m[0], COMMENT] : null; },
+  // decorator
+  (s) => { const m = s.match(/^@[a-zA-Z_][a-zA-Z0-9_.]*/); return m ? [m[0], BUILTIN] : null; },
+  // keyword
+  (s) => { const m = s.match(/^(def|class|return|if|elif|else|for|while|import|from|as|try|except|finally|with|yield|raise|assert|pass|break|continue|and|or|not|is|in|lambda|global|nonlocal|async|await)(?=\b|[^a-zA-Z0-9_])/); return m ? [m[0], KEYWORD] : null; },
+  // builtin
+  (s) => { const m = s.match(/^(True|False|None|self|cls|print|len|range|int|str|float|list|dict|set|tuple|type|open|enumerate|zip|map|filter|sorted|reversed|super|isinstance|hasattr|getattr|setattr|delattr|property|staticmethod|classmethod)(?=\b|[^a-zA-Z0-9_])/); return m ? [m[0], BUILTIN] : null; },
+  // number
+  (s) => { const m = s.match(/^\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b/); return m ? [m[0], NUMBER] : null; },
+  // function call
+  (s) => { const m = s.match(/^[a-zA-Z_][a-zA-Z0-9_]*(?=\s*\()/); return m ? [m[0], TYPE] : null; },
+];
+
+const jsMatchers: TokenMatcher[] = [
+  // template literal
+  (s) => { const m = s.match(/^`[^`]*`/); return m ? [m[0], STRING] : null; },
+  // string
+  (s) => { const m = s.match(/^'[^']*'|^"[^"]*"/); return m ? [m[0], STRING] : null; },
+  // JSX / XML
+  (s) => { const m = s.match(/^<\/?[A-Za-z][A-Za-z0-9.-]*[^>]*\/?>/); return m ? [m[0], BUILTIN] : null; },
+  // line comment
+  (s) => { const m = s.match(/^\/\/.*/); return m ? [m[0], COMMENT] : null; },
+  // keyword
+  (s) => { const m = s.match(/^(function|const|let|var|return|if|else|for|while|do|switch|case|break|continue|try|catch|finally|throw|new|this|class|extends|import|export|from|default|async|await|yield|typeof|instanceof|in|of|delete|void|with|debugger)(?=\b|[^a-zA-Z0-9_$])/); return m ? [m[0], KEYWORD] : null; },
+  // literal
+  (s) => { const m = s.match(/^(true|false|null|undefined|NaN|Infinity)(?=\b|[^a-zA-Z0-9_$])/); return m ? [m[0], BUILTIN] : null; },
+  // arrow
+  (s) => { const m = s.match(/^=>/); return m ? [m[0], OPERATOR] : null; },
+  // number
+  (s) => { const m = s.match(/^\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b/); return m ? [m[0], NUMBER] : null; },
+  // property access / method call
+  (s) => { const m = s.match(/^(?:console|Math|JSON|Object|Array|String|Number|Boolean|Promise|Error|Map|Set|Date|RegExp|parseInt|parseFloat|isNaN|isFinite|encodeURIComponent|decodeURIComponent)(?=\b|[^a-zA-Z0-9_$])/); return m ? [m[0], BUILTIN] : null; },
+  // identifier.fn(
+  (s) => { const m = s.match(/^[a-zA-Z_$][a-zA-Z0-9_$]*(?=\s*\()/); return m ? [m[0], TYPE] : null; },
+];
+
+const xmlMatchers: TokenMatcher[] = [
+  // tag
+  (s) => { const m = s.match(/^<\/?[A-Za-z][A-Za-z0-9:_.-]*(?:\s+[A-Za-z][A-Za-z0-9:_.-]*(?:\s*=\s*(?:"[^"]*"|'[^']*'))?\s*)*\/?>/); return m ? [m[0], BUILTIN] : null; },
+  // attribute value
+  (s) => { const m = s.match(/^"[^"]*"/); return m ? [m[0], STRING] : null; },
+  // comment
+  (s) => { const m = s.match(/^<!--[^]*?-->/); return m ? [m[0], COMMENT] : null; },
+  // text content
+  (s) => { const m = s.match(/^[^<]+/); return m ? [m[0], faint] : null; },
+];
+
+const jsonMatchers: TokenMatcher[] = [
+  // string
+  (s) => { const m = s.match(/^"(?:[^"\\]|\\.)*"/); return m ? [m[0], STRING] : null; },
+  // number
+  (s) => { const m = s.match(/^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b/); return m ? [m[0], NUMBER] : null; },
+  // keyword
+  (s) => { const m = s.match(/^(true|false|null)(?=\b|[^a-zA-Z0-9_])/); return m ? [m[0], KEYWORD] : null; },
+];
+
+const sqlMatchers: TokenMatcher[] = [
+  // string
+  (s) => { const m = s.match(/^'[^']*'/); return m ? [m[0], STRING] : null; },
+  // comment
+  (s) => { const m = s.match(/^--.*/); return m ? [m[0], COMMENT] : null; },
+  // keyword
+  (s) => { const m = s.match(/^(SELECT|FROM|WHERE|AND|OR|NOT|IN|LIKE|BETWEEN|IS|NULL|INSERT|INTO|VALUES|UPDATE|SET|DELETE|CREATE|TABLE|DROP|ALTER|ADD|INDEX|PRIMARY|KEY|FOREIGN|REFERENCES|JOIN|LEFT|RIGHT|INNER|OUTER|ON|AS|ORDER|BY|GROUP|HAVING|LIMIT|OFFSET|UNION|ALL|DISTINCT|COUNT|SUM|AVG|MIN|MAX|CASE|WHEN|THEN|ELSE|END|EXISTS|CAST|COALESCE)(?=\b|[^a-zA-Z0-9_])/i); return m ? [m[0], KEYWORD] : null; },
+  // number
+  (s) => { const m = s.match(/^\b\d+(?:\.\d+)?\b/); return m ? [m[0], NUMBER] : null; },
+];
+
+const yamlMatchers: TokenMatcher[] = [
+  // comment
+  (s) => { const m = s.match(/^#.*/); return m ? [m[0], COMMENT] : null; },
+  // key:
+  (s) => { const m = s.match(/^[a-zA-Z_][a-zA-Z0-9_]*(?=\s*:)/); return m ? [m[0], KEYWORD] : null; },
+  // string value
+  (s) => { const m = s.match(/^"[^"]*"|^'[^']*'/); return m ? [m[0], STRING] : null; },
+  // number
+  (s) => { const m = s.match(/^\b\d+(?:\.\d+)?\b/); return m ? [m[0], NUMBER] : null; },
+  // boolean / null
+  (s) => { const m = s.match(/^(true|false|null|yes|no|on|off)(?=\b|[^a-zA-Z0-9_])/i); return m ? [m[0], BUILTIN] : null; },
+];
+
+const defaultMatchers: TokenMatcher[] = [
+  (s) => { const m = s.match(/^'[^']*'|^"[^"]*"/); return m ? [m[0], STRING] : null; },
+  (s) => { const m = s.match(/^(#|\/\/)\s?.*/); return m ? [m[0], COMMENT] : null; },
+  (s) => { const m = s.match(/^\b\d+(?:\.\d+)?\b/); return m ? [m[0], NUMBER] : null; },
+];
+
+function pickHighlighter(language: string): Highlighter {
+  const lang = language.toLowerCase();
+  let matchers: TokenMatcher[];
+
+  switch (lang) {
+    case "sh": case "bash": case "shell": case "zsh": case "powershell": case "pwsh": case "ps1":
+      matchers = shellMatchers; break;
+    case "py": case "python": case "python3":
+      matchers = pythonMatchers; break;
+    case "js": case "javascript": case "ts": case "typescript": case "mjs": case "cjs":
+      matchers = jsMatchers; break;
+    case "xml": case "html": case "htm": case "svg":
+      matchers = xmlMatchers; break;
+    case "json": case "jsonc":
+      matchers = jsonMatchers; break;
+    case "sql": case "mysql": case "psql": case "sqlite":
+      matchers = sqlMatchers; break;
+    case "yaml": case "yml":
+      matchers = yamlMatchers; break;
+    default:
+      matchers = defaultMatchers;
+  }
+
+  return (line: string) => tokenize(line, matchers);
 }
 
 /**
@@ -410,11 +592,9 @@ export class CodexLikeTurnRenderer {
         this.terminal.writeLine(rendered);
       }
     }
-    // Live text: show the partial line (still in progress).
-    for (const rendered of this.md.processLine(this.pendingText)) {
-      this.terminal.writeLine(rendered);
-      this.pendingText = "";
-    }
+    // Partial line still in progress — show as live text only.
+    // Do NOT feed it through processLine as a complete line; that would
+    // flush every token-delta as its own output line.
     this.terminal.setLiveText(renderMarkdownLine(this.pendingText));
   }
 
