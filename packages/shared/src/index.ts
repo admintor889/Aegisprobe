@@ -200,6 +200,7 @@ export type SecurityCveMatch = {
   confidence: "low" | "medium" | "high";
   rationale: string;
   source: string;
+  relevanceScore?: number;
   createdAt: string;
 };
 

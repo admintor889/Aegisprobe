@@ -6,7 +6,6 @@ import type { AuditStore } from "@aegisprobe/storage";
 import { browserRiskSignals, emptyNormalizedSecurityObservation, isApiLikeBrowserUrl, launchChromiumBrowser, loadOptionalPlaywright, normalizeBrowserUrl, uniqueBrowserActions, uniqueStorageSignals } from "./browser-automation.js";
 import { sanitizePathSegment } from "./core-helpers.js";
 import { recordTechnologyHints } from "./security-observations.js";
-import { buildWebPentestControlPlane } from "./web-pentest-control-plane.js";
 
 function browserArtifactDir(projectRoot: string, sessionId: string, workflowId: string | undefined): string {
   return joinPath(
@@ -1365,39 +1364,6 @@ export async function reconWebApplication(
         updatedAt: nowIso()
       }, [normalizedApiEvidenceId]));
     }
-
-    const controlPlane = buildWebPentestControlPlane(store, sessionId, latestWorkflow?.id);
-    const controlPlaneArtifactPath = joinPath(dir, `web-pentest-control-plane-${Date.now()}.json`);
-    writeFileSync(controlPlaneArtifactPath, JSON.stringify({
-      sessionId,
-      workflowId: latestWorkflow?.id,
-      generatedFrom: {
-        webappReconArtifact: artifactPath,
-        normalizedApiArtifact: normalizedApiArtifactPath,
-        authAssessmentArtifact: authAssessmentArtifactPath,
-        jsAnalysisArtifact: jsAnalysisArtifactPath
-      },
-      controlPlane
-    }, null, 2), "utf8");
-    store.addEvidence({
-      id: newId("evd"),
-      sessionId,
-      workflowId: latestWorkflow?.id,
-      source: "web:control-plane",
-      kind: "note",
-      summary: [
-        `Web pentest control plane stage=${controlPlane.stage}`,
-        `normalizedApi=${controlPlane.evidenceCounts.normalizedApiEndpoints}`,
-        `jsAssets=${controlPlane.evidenceCounts.scriptAssets}`,
-        `authContexts=${controlPlane.evidenceCounts.authContexts}`,
-        `next=${truncateForContext(controlPlane.nextBestActions[0] ?? controlPlane.summary, 240)}`
-      ].join("; "),
-      data: JSON.stringify({
-        artifactPath: controlPlaneArtifactPath,
-        controlPlane
-      }, null, 2),
-      createdAt: nowIso()
-    });
 
     return result;
   } catch (error) {

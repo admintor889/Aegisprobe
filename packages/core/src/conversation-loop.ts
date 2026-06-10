@@ -1,28 +1,13 @@
-// ── Interactive Conversation Loop ──
-// Replaces the autonomous pentest pipeline with an interactive turn-based loop.
-//
-// Pattern inspiration from Claude Code's query.ts:
-//   1. Take user message + conversation history
-//   2. Stream LLM response (text + tool calls)
-//   3. Execute tools, feed results back, continue
-//   4. Respect AbortSignal for user interrupts
-//   5. Yield events for the UI to display
-
-import type { ChatMessage, OpenAICompatibleProvider, StreamEvent } from "@aegisprobe/provider";
-import type { McpManager } from "@aegisprobe/mcp";
-import type { AuditStore } from "@aegisprobe/storage";
-import { nowIso, newId } from "@aegisprobe/shared";
-import { renderPromptPackTemplate } from "./prompt-pack.js";
-
-// ── Types ──
+import type { ChatMessage, OpenAICompatibleProvider, ToolDefinition } from "@aegisprobe/provider";
+import type { AgentToolEnvelope } from "./agent-tool-envelope.js";
+import { createAgentToolEnvelope, renderAgentToolEnvelope } from "./agent-tool-envelope.js";
 
 export type ConversationMessage = {
   id: string;
   role: "user" | "assistant" | "system" | "tool";
   content: string;
-  /** Tool call ID (for tool results) */
+  reasoningContent?: string;
   toolCallId?: string;
-  /** Tool calls made by the assistant in this message */
   toolCalls?: Array<{ id: string; name: string; arguments: string }>;
   createdAt: string;
 };
@@ -40,377 +25,203 @@ export type ConversationTurnEvent =
   | { kind: "turn_aborted" }
   | { kind: "turn_error"; error: string };
 
-export type ConversationLoopOptions = {
-  provider: OpenAICompatibleProvider;
-  store: AuditStore;
-  mcpManager?: McpManager;
-  /** Current conversation messages (user + assistant + tool results) */
-  messages: ConversationMessage[];
-  /** System prompt for the agent personality */
-  systemPrompt: string;
-  /** Abort signal for user interrupt */
+export type AgentThreadToolContext = {
   signal?: AbortSignal;
-  /** Tool executors */
-  executeShell: (command: string, purpose: string) => Promise<string>;
-  executeReadFile: (path: string, purpose: string) => Promise<string>;
-  executeListFiles: (path: string, recursive: boolean) => Promise<string>;
-  executeSecurityProbe: (target: string, probe: string) => Promise<string>;
-  executeFofaSearch: (query: string, size?: number) => Promise<string>;
-  executeWebFetch: (url: string, purpose: string) => Promise<string>;
-  /** Max tool call rounds per turn (safety limit) */
-  maxToolRounds?: number;
 };
 
-// ── Tool definitions for the LLM ──
+export type AgentThreadTool = {
+  definition: ToolDefinition;
+  execute: (
+    args: Record<string, unknown>,
+    context: AgentThreadToolContext
+  ) => Promise<AgentToolEnvelope>;
+};
 
-const CONVERSATION_TOOLS = [
-  {
-    type: "function" as const,
-    function: {
-      name: "execute_shell",
-      description:
-        "Execute a shell command (PowerShell on Windows, bash on Linux). Use for file operations, running tools, git, npm, etc. Commands are subject to safety policy checks.",
-      parameters: {
-        type: "object" as const,
-        properties: {
-          command: { type: "string", description: "The full shell command to execute" },
-          purpose: { type: "string", description: "Why this command is needed (one sentence)" }
-        },
-        required: ["command", "purpose"]
-      }
-    }
-  },
-  {
-    type: "function" as const,
-    function: {
-      name: "read_file",
-      description: "Read the contents of a file from the workspace. Returns file content with line numbers.",
-      parameters: {
-        type: "object" as const,
-        properties: {
-          path: { type: "string", description: "Path to the file (relative to project root or absolute)" },
-          purpose: { type: "string", description: "Why you need to read this file" }
-        },
-        required: ["path", "purpose"]
-      }
-    }
-  },
-  {
-    type: "function" as const,
-    function: {
-      name: "list_directory",
-      description: "List files and subdirectories in a directory.",
-      parameters: {
-        type: "object" as const,
-        properties: {
-          path: { type: "string", description: "Directory path to list" },
-          recursive: { type: "boolean", description: "Whether to list recursively", default: false }
-        },
-        required: ["path"]
-      }
-    }
-  },
-  {
-    type: "function" as const,
-    function: {
-      name: "security_probe",
-      description: "Perform a security probe: DNS lookups, HTTP header checks, or basic recon on a target.",
-      parameters: {
-        type: "object" as const,
-        properties: {
-          target: { type: "string", description: "URL or hostname to probe" },
-          probe: {
-            type: "string",
-            description: "Probe type: basic_recon, dns, or http_headers",
-            enum: ["basic_recon", "dns", "http_headers"]
-          }
-        },
-        required: ["target", "probe"]
-      }
-    }
-  },
-  {
-    type: "function" as const,
-    function: {
-      name: "fofa_search",
-      description:
-        "Search FOFA (network space search engine) for internet-connected assets. Use FOFA query syntax like domain=\"whu.edu.cn\", title=\"login\", server=\"nginx\", port=\"8080\", etc. Returns hosts with IP, port, title, and server info. Perfect for discovering subdomains, exposed services, and attack surface mapping.",
-      parameters: {
-        type: "object" as const,
-        properties: {
-          query: {
-            type: "string",
-            description: "FOFA query string, e.g. domain=\"whu.edu.cn\" or title=\"管理系统\" || cert=\"whu.edu.cn\""
-          },
-          size: {
-            type: "number",
-            description: "Max results to return (default 50, max 200)"
-          }
-        },
-        required: ["query"]
-      }
-    }
-  },
-  {
-    type: "function" as const,
-    function: {
-      name: "web_fetch",
-      description:
-        "Fetch the content of a URL and return visible text (scripts, styles, nav stripped). Use for analyzing web pages, checking technologies, finding endpoints, reading documentation, or verifying vulnerabilities. Returns text content of the page.",
-      parameters: {
-        type: "object" as const,
-        properties: {
-          url: { type: "string", description: "Full URL to fetch (http:// or https://)" },
-          purpose: { type: "string", description: "Why you are fetching this URL" }
-        },
-        required: ["url", "purpose"]
-      }
-    }
-  }
-];
+export type ConversationLoopOptions = {
+  provider: OpenAICompatibleProvider;
+  messages: ConversationMessage[];
+  systemPrompt: string;
+  tools: AgentThreadTool[];
+  signal?: AbortSignal;
+  maxActiveContextChars?: number;
+  fullToolResultsToKeep?: number;
+  onMessage?: (message: Omit<ConversationMessage, "id" | "createdAt">) => void;
+};
 
-// ── System Prompt ──
-
-function defaultConversationSystemPrompt(): string {
-  return renderPromptPackTemplate("conversation/default-system.md");
-}
-
-// ── Core Loop ──
-
-/**
- * Run a single conversation turn.
- *
- * Takes the user's input + conversation history, streams the LLM response,
- * executes any requested tools, feeds results back, and continues until
- * the LLM produces a natural stop or the abort signal fires.
- */
 export async function* runConversationTurn(
   options: ConversationLoopOptions
 ): AsyncGenerator<ConversationTurnEvent> {
-  const {
-    provider,
-    messages,
-    systemPrompt,
-    signal,
-    executeShell,
-    executeReadFile,
-    executeListFiles,
-    executeSecurityProbe,
-    executeFofaSearch,
-    executeWebFetch,
-    maxToolRounds = 10
-  } = options;
+  const apiMessages = buildApiMessages(options.systemPrompt, options.messages);
+  const toolDefinitions = options.tools.map((tool) => tool.definition);
+  const toolsByName = new Map(options.tools.map((tool) => [tool.definition.function.name, tool]));
 
-  // Build the API message array
-  const apiMessages: ChatMessage[] = [
-    { role: "system", content: systemPrompt || defaultConversationSystemPrompt() },
-  ];
-  for (const m of messages) {
-    if (m.role === "system") continue; // system prompt already injected
-    if (m.role === "tool") {
-      apiMessages.push({
-        role: "tool",
-        content: m.content || "",
-        tool_call_id: m.toolCallId ?? ""
-      });
-    } else if (m.role === "assistant" && m.toolCalls && m.toolCalls.length > 0) {
-      apiMessages.push({
-        role: "assistant",
-        content: m.content || null,
-        tool_calls: m.toolCalls.map((tc) => ({
-          id: tc.id,
-          type: "function" as const,
-          function: { name: tc.name, arguments: tc.arguments }
-        }))
-      });
-    } else {
-      apiMessages.push({
-        role: (m.role === "assistant" ? "assistant" : "user") as "assistant" | "user",
-        content: m.content || ""
-      });
-    }
-  }
-
-  // Track accumulated response for this turn
-  let accumulatedText = "";
-  let accumulatedToolCalls: Array<{ id: string; name: string; arguments: string }> = [];
-
-  for (let round = 0; round < maxToolRounds; round++) {
-    // Check for abort before API call
-    if (signal?.aborted) {
+  // No hard round limit — the model decides when to stop by producing
+  // text without further tool calls. The context window and token budget
+  // provide natural back-pressure; compaction handles long sessions.
+  while (true) {
+    if (options.signal?.aborted) {
       yield { kind: "turn_aborted" };
       return;
     }
 
-    accumulatedText = "";
-    accumulatedToolCalls = [];
+    let accumulatedText = "";
+    let accumulatedReasoning = "";
+    const accumulatedToolCalls: Array<{ id: string; name: string; arguments: string }> = [];
+    let textStarted = false;
+    let textEnded = false;
+    let stopReason = "end";
+    const announcedToolCalls = new Set<string>();
+    const completedToolCalls = new Set<string>();
 
     try {
-      let hasYieldedTextStart = false;
-      const pendingToolCalls = new Map<number, { id: string; name: string; arguments: string }>();
-
-      for await (const event of provider.streamComplete(apiMessages, {
-        signal,
-        tools: CONVERSATION_TOOLS,
+      const requestMessages = boundActiveToolContext(
+        apiMessages,
+        options.maxActiveContextChars ?? 180_000,
+        options.fullToolResultsToKeep ?? 4
+      );
+      for await (const event of options.provider.streamComplete(requestMessages, {
+        signal: options.signal,
+        tools: toolDefinitions,
         toolChoice: "auto"
       })) {
-        // Check abort during streaming
-        if (signal?.aborted) {
+        if (options.signal?.aborted) {
           yield { kind: "turn_aborted" };
           return;
         }
 
-        switch (event.kind) {
-          case "text_delta": {
-            if (!hasYieldedTextStart) {
-              yield { kind: "text_start" };
-              hasYieldedTextStart = true;
-            }
-            accumulatedText += event.content;
-            yield { kind: "text_delta", content: event.content };
-            break;
+        if (event.kind === "text_delta") {
+          if (!textStarted) {
+            textStarted = true;
+            yield { kind: "text_start" };
           }
+          accumulatedText += event.content;
+          yield { kind: "text_delta", content: event.content };
+          continue;
+        }
 
-          case "tool_call_delta": {
-            // Track tool call arguments
-            if (event.id) {
-              const idx = pendingToolCalls.size;
-              let tc = [...pendingToolCalls.values()].find((t) => t.id === event.id);
-              if (!tc) {
-                tc = { id: event.id, name: event.name, arguments: "" };
-                pendingToolCalls.set(idx, tc);
-              }
-              if (event.name) tc.name = event.name;
-              tc.arguments += event.arguments;
-            }
-            break;
+        if (event.kind === "reasoning_delta") {
+          accumulatedReasoning += event.content;
+          continue;
+        }
+
+        if (event.kind === "tool_call_finished") {
+          if (completedToolCalls.has(event.id)) {
+            continue;
           }
-
-          case "tool_call_finished": {
-            accumulatedToolCalls.push({
-              id: event.id,
-              name: event.name,
-              arguments: event.arguments
-            });
-            yield { kind: "tool_call_end", id: event.id, name: event.name, arguments: event.arguments };
-            break;
+          completedToolCalls.add(event.id);
+          if (!announcedToolCalls.has(event.id)) {
+            announcedToolCalls.add(event.id);
+            yield { kind: "tool_call_start", id: event.id, name: event.name };
           }
+          accumulatedToolCalls.push({
+            id: event.id,
+            name: event.name,
+            arguments: event.arguments
+          });
+          yield {
+            kind: "tool_call_end",
+            id: event.id,
+            name: event.name,
+            arguments: event.arguments
+          };
+          continue;
+        }
 
-          case "message_stop": {
-            if (hasYieldedTextStart) {
-              yield { kind: "text_end" };
-            }
-
-            if (event.stopReason === "aborted") {
-              yield { kind: "turn_aborted" };
-              return;
-            }
-
-            // If there are no tool calls, the turn is complete
-            if (accumulatedToolCalls.length === 0) {
-              yield { kind: "turn_complete", stopReason: event.stopReason };
-              return;
-            }
-            break;
+        if (event.kind === "tool_call_delta") {
+          if (event.id && !announcedToolCalls.has(event.id)) {
+            announcedToolCalls.add(event.id);
+            yield { kind: "tool_call_start", id: event.id, name: event.name };
           }
+          if (event.id && event.arguments) {
+            yield { kind: "tool_call_delta", id: event.id, arguments: event.arguments };
+          }
+          continue;
+        }
 
-          case "error": {
-            yield { kind: "turn_error", error: event.error };
+        if (event.kind === "message_stop") {
+          stopReason = event.stopReason;
+          if (textStarted && !textEnded) {
+            textEnded = true;
+            yield { kind: "text_end" };
+          }
+          if (event.stopReason === "aborted") {
+            yield { kind: "turn_aborted" };
             return;
           }
+          continue;
+        }
+
+        if (event.kind === "error") {
+          yield { kind: "turn_error", error: event.error };
+          return;
         }
       }
 
-      // If no tool calls were accumulated, we're done
+      if (textStarted && !textEnded) {
+        yield { kind: "text_end" };
+      }
+      const assistantMessage = {
+        role: "assistant" as const,
+        content: accumulatedText,
+        ...(accumulatedToolCalls.length > 0 && accumulatedReasoning
+          ? { reasoningContent: accumulatedReasoning }
+          : {}),
+        ...(accumulatedToolCalls.length > 0 ? { toolCalls: accumulatedToolCalls } : {})
+      };
+      if (accumulatedText || accumulatedToolCalls.length > 0) {
+        options.onMessage?.(assistantMessage);
+      }
+
       if (accumulatedToolCalls.length === 0) {
-        yield { kind: "turn_complete", stopReason: "end" };
+        yield { kind: "turn_complete", stopReason };
         return;
       }
 
-      // Execute tools and feed results back
-      const toolResults: Array<{ toolCallId: string; role: "tool"; content: string }> = [];
+      apiMessages.push({
+        role: "assistant",
+        content: accumulatedText || null,
+        ...(accumulatedReasoning ? { reasoning_content: accumulatedReasoning } : {}),
+        tool_calls: accumulatedToolCalls.map((toolCall) => ({
+          id: toolCall.id,
+          type: "function",
+          function: { name: toolCall.name, arguments: toolCall.arguments }
+        }))
+      });
 
-      for (const tc of accumulatedToolCalls) {
-        if (signal?.aborted) {
+      for (const toolCall of accumulatedToolCalls) {
+        if (options.signal?.aborted) {
           yield { kind: "turn_aborted" };
           return;
         }
 
-        yield { kind: "tool_execution_start", id: tc.id, name: tc.name };
-
-        let result: string;
-        let isError = false;
-
-        try {
-          const args = safeJsonParse(tc.arguments);
-
-          switch (tc.name) {
-            case "execute_shell": {
-              result = await executeShell(String(args.command ?? ""), String(args.purpose ?? ""));
-              break;
-            }
-            case "read_file": {
-              result = await executeReadFile(String(args.path ?? ""), String(args.purpose ?? ""));
-              break;
-            }
-            case "list_directory": {
-              result = await executeListFiles(String(args.path ?? ""), Boolean(args.recursive));
-              break;
-            }
-            case "security_probe": {
-              result = await executeSecurityProbe(String(args.target ?? ""), String(args.probe ?? "basic_recon"));
-              break;
-            }
-            case "fofa_search": {
-              result = await executeFofaSearch(String(args.query ?? ""), args.size ? Number(args.size) : undefined);
-              break;
-            }
-            case "web_fetch": {
-              result = await executeWebFetch(String(args.url ?? ""), String(args.purpose ?? ""));
-              break;
-            }
-            default: {
-              result = `Unknown tool: ${tc.name}`;
-              isError = true;
-            }
-          }
-        } catch (err) {
-          result = `Tool execution error: ${err instanceof Error ? err.message : String(err)}`;
-          isError = true;
-        }
-
-        yield { kind: "tool_execution_end", id: tc.id, result, error: isError };
-
-        toolResults.push({
-          toolCallId: tc.id,
+        yield { kind: "tool_execution_start", id: toolCall.id, name: toolCall.name };
+        const envelope = await executeToolCall(
+          toolsByName,
+          toolCall.name,
+          toolCall.arguments,
+          options.signal
+        );
+        const rendered = renderAgentToolEnvelope(envelope);
+        options.onMessage?.({
           role: "tool",
-          content: isError ? `Error: ${result}` : result
+          content: rendered,
+          toolCallId: toolCall.id
         });
-      }
-
-      // Add assistant message (with tool calls) + tool results to apiMessages for next round
-      apiMessages.push({
-        role: "assistant",
-        content: accumulatedText || null,
-        tool_calls: accumulatedToolCalls.map((tc) => ({
-          id: tc.id,
-          type: "function" as const,
-          function: { name: tc.name, arguments: tc.arguments }
-        }))
-      });
-
-      for (const tr of toolResults) {
         apiMessages.push({
           role: "tool",
-          content: tr.content,
-          tool_call_id: tr.toolCallId
+          content: rendered,
+          tool_call_id: toolCall.id
         });
+        yield {
+          kind: "tool_execution_end",
+          id: toolCall.id,
+          result: rendered,
+          error: envelope.status !== "success"
+        };
       }
-
-      // Continue loop for next round of tool calls
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      if (message.includes("abort") || signal?.aborted) {
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (options.signal?.aborted || /abort/i.test(message)) {
         yield { kind: "turn_aborted" };
       } else {
         yield { kind: "turn_error", error: message };
@@ -419,17 +230,157 @@ export async function* runConversationTurn(
     }
   }
 
-  // Max rounds reached
-  yield {
-    kind: "turn_complete",
-    stopReason: `max_tool_rounds (${maxToolRounds})`
-  };
+  // Unreachable — the while(true) loop exits via return when the model
+  // produces text without tool calls, or via turn_aborted/turn_error.
 }
 
-function safeJsonParse(text: string): Record<string, unknown> {
+export function boundActiveToolContext(
+  messages: ChatMessage[],
+  maxChars: number,
+  fullToolResultsToKeep: number
+): ChatMessage[] {
+  const bounded = messages.map((message) => ({
+    ...message,
+    ...(message.tool_calls ? {
+      tool_calls: message.tool_calls.map((toolCall) => ({
+        ...toolCall,
+        function: { ...toolCall.function }
+      }))
+    } : {})
+  }));
+  if (chatMessageChars(bounded) <= maxChars) {
+    return bounded;
+  }
+
+  const toolIndexes = bounded
+    .map((message, index) => message.role === "tool" ? index : -1)
+    .filter((index) => index >= 0);
+  const initiallyCollapsible = toolIndexes.slice(0, Math.max(0, toolIndexes.length - fullToolResultsToKeep));
+  const remaining = toolIndexes.slice(initiallyCollapsible.length);
+
+  for (const index of initiallyCollapsible.concat(remaining)) {
+    const message = bounded[index];
+    if (!message || message.role !== "tool" || typeof message.content !== "string") continue;
+    message.content = collapseToolEnvelope(message.content);
+    if (chatMessageChars(bounded) <= maxChars) break;
+  }
+  return bounded;
+}
+
+function collapseToolEnvelope(content: string): string {
   try {
-    return JSON.parse(text);
+    const envelope = JSON.parse(content) as Record<string, unknown>;
+    const metadata = isRecord(envelope.metadata) ? envelope.metadata : {};
+    const rawArtifact = isRecord(metadata.rawArtifact) ? metadata.rawArtifact : undefined;
+    if (!rawArtifact) return content;
+    return JSON.stringify({
+      version: envelope.version,
+      tool: envelope.tool,
+      status: envelope.status,
+      startedAt: envelope.startedAt,
+      endedAt: envelope.endedAt,
+      durationMs: envelope.durationMs,
+      exitCode: envelope.exitCode,
+      stdout: "",
+      stderr: "",
+      artifacts: envelope.artifacts,
+      truncated: envelope.truncated,
+      metadata: {
+        ...metadata,
+        activeContext: "Preview omitted after it was observed. Exact bytes remain available through rawArtifact and artifact_read."
+      }
+    });
   } catch {
-    return {};
+    return content;
+  }
+}
+
+function chatMessageChars(messages: ChatMessage[]): number {
+  return messages.reduce((sum, message) =>
+    sum
+    + (message.content?.length ?? 0)
+    + (message.reasoning_content?.length ?? 0)
+    + (message.tool_calls ? JSON.stringify(message.tool_calls).length : 0),
+  0);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function buildApiMessages(systemPrompt: string, messages: ConversationMessage[]): ChatMessage[] {
+  const apiMessages: ChatMessage[] = [{ role: "system", content: systemPrompt }];
+  for (const message of messages) {
+    if (message.role === "system") {
+      apiMessages.push({ role: "system", content: message.content });
+    } else if (message.role === "tool") {
+      apiMessages.push({
+        role: "tool",
+        content: message.content,
+        tool_call_id: message.toolCallId ?? ""
+      });
+    } else if (message.role === "assistant" && message.toolCalls?.length) {
+      apiMessages.push({
+        role: "assistant",
+        content: message.content || null,
+        ...(message.reasoningContent ? { reasoning_content: message.reasoningContent } : {}),
+        tool_calls: message.toolCalls.map((toolCall) => ({
+          id: toolCall.id,
+          type: "function",
+          function: { name: toolCall.name, arguments: toolCall.arguments }
+        }))
+      });
+    } else {
+      apiMessages.push({
+        role: message.role,
+        content: message.content
+      });
+    }
+  }
+  return apiMessages;
+}
+
+async function executeToolCall(
+  toolsByName: Map<string, AgentThreadTool>,
+  name: string,
+  rawArguments: string,
+  signal?: AbortSignal
+): Promise<AgentToolEnvelope> {
+  const startedAt = new Date().toISOString();
+  const tool = toolsByName.get(name);
+  if (!tool) {
+    return createAgentToolEnvelope({
+      tool: name,
+      status: "error",
+      startedAt,
+      stderr: `Unknown tool: ${name}`
+    });
+  }
+
+  let args: Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(rawArguments || "{}");
+    args = parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {};
+  } catch (error) {
+    return createAgentToolEnvelope({
+      tool: name,
+      status: "error",
+      startedAt,
+      stderr: `Invalid tool arguments: ${error instanceof Error ? error.message : String(error)}`,
+      metadata: { rawArguments }
+    });
+  }
+
+  try {
+    return await tool.execute(args, { signal });
+  } catch (error) {
+    return createAgentToolEnvelope({
+      tool: name,
+      status: signal?.aborted ? "timeout" : "error",
+      startedAt,
+      stderr: error instanceof Error ? error.stack ?? error.message : String(error)
+    });
   }
 }

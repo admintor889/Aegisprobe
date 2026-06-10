@@ -132,7 +132,7 @@ function isConcretePayloadEvidence(item: SecurityEvidence): boolean {
   if (/^(?:pentest:model_loop|graph:blackboard|decision:|web:control-plane)/i.test(item.source)) return false;
   const source = item.source.toLowerCase();
   if (/shell|command/.test(source)) return false;
-  return /^(?:browser:|anonymous_baseline_fetch|safe_readonly_fetch|security_probe:|manual:api-description|api-description|api-inventory)/i.test(item.source)
+  return /^(?:browser:|anonymous_baseline_fetch|safe_readonly_fetch|security_probe:|manual:api-description|api-description|api-inventory|agent-tool:http_request|agent-tool:web_recon|agent-tool:fingerprint)/i.test(item.source)
     || /webapp-recon|api-inventory|auth-surface/.test(source);
 }
 
@@ -233,7 +233,7 @@ function collectInsertionHints(
 
 function addCandidate(candidates: PayloadCandidate[], context: CandidateContext, candidate: PayloadCandidate | undefined): void {
   if (!candidate) return;
-  if (context.focus && !candidateMatchesFocus(candidate, context.focus)) return;
+  if (context.focus && isRecognizedCategoryFocus(context.focus) && !candidateMatchesFocus(candidate, context.focus)) return;
   candidates.push(candidate);
 }
 
@@ -261,7 +261,12 @@ function sqlInjectionCandidate(context: CandidateContext): PayloadCandidate | un
 
 function sstiCandidate(context: CandidateContext): PayloadCandidate | undefined {
   if (!hasSstiEvidence(context)) return undefined;
-  if (!hasConcreteCategorySurface(context, "ssti")) return undefined;
+  // For SSTI, strong template-engine evidence (e.g. gunicorn+Flask, Jinja, ERB)
+  // is sufficient — every user-controlled parameter on a server-rendered page
+  // is a plausible injection surface. The anti-evidence check in hasSstiEvidence
+  // already excludes non-template stacks like ActiveMQ.
+  // Only require concrete category surface when evidence is weak/indirect.
+  if (!hasStrongSstiEvidence(context) && !hasConcreteCategorySurface(context, "ssti")) return undefined;
   return candidate("pc-ssti", "ssti", "Server-side template expression probes", "medium", context, {
     payloads: ["{{7*7}}", "${7*7}", "#{7*7}", "<%= 7*7 %>"],
     prerequisites: ["A user-controlled value appears in server-rendered output or template-like error context."],
@@ -437,7 +442,11 @@ function allowEndpointFallback(category: PayloadCandidate["category"]): boolean 
 }
 
 function allowGenericInsertionFallback(category: PayloadCandidate["category"]): boolean {
-  return category === "xss_reflection" || category === "sql_injection" || category === "ssti";
+  // SSTI is excluded from the generic fallback — it requires explicit
+  // templating-engine evidence (see hasSstiEvidence). Without this guard
+  // every parameter on any endpoint would match SSTI, producing noise
+  // on non-template stacks like ActiveMQ, databases, and message brokers.
+  return category === "xss_reflection" || category === "sql_injection";
 }
 
 function insertionHintMatchesCategory(hint: PayloadInsertionHint, category: PayloadCandidate["category"]): boolean {
@@ -475,6 +484,14 @@ function insertionHintMatchesCategory(hint: PayloadInsertionHint, category: Payl
   if (category === "xss_reflection") {
     if (/csrf|xsrf|token|nonce|submit|^login$/i.test(name)) return false;
     return ["query", "body", "path"].includes(hint.location);
+  }
+  if (category === "ssti") {
+    // SSTI gating is primarily handled by hasSstiEvidence/hasStrongSstiEvidence
+    // in sstiCandidate. Here we just check that the hint looks like a plausible
+    // injection surface for template evaluation — typically query/body/path
+    // parameters on server-rendered pages. The anti-evidence for non-template
+    // stacks (ActiveMQ, databases) is enforced upstream.
+    return hint.location === "query" || hint.location === "body" || hint.location === "path";
   }
   return hint.location === "query" || hint.location === "body" || hint.location === "path";
 }
@@ -539,11 +556,30 @@ const focusAliases: Partial<Record<PayloadCandidate["category"], string[]>> = {
   xxe: ["xml external entity"]
 };
 
+function isRecognizedCategoryFocus(focus: string): boolean {
+  const terms = focus.toLowerCase().split(/[\s,;]+/).filter(Boolean);
+  return Object.entries(focusAliases).some(([category, aliases]) => {
+    const corpus = [category, ...(aliases ?? [])].join(" ").toLowerCase();
+    return terms.some((term) => corpus.includes(term));
+  });
+}
+
 function hasAny(context: CandidateContext, terms: string[]): boolean {
   return terms.some((term) => context.corpus.includes(term.toLowerCase()));
 }
 
 function hasSstiEvidence(context: CandidateContext): boolean {
+  // Anti-evidence: Java message brokers, databases, and similar stacks rarely
+  // have server-side template injection surfaces. If the technology evidence
+  // points to these, SSTI is almost certainly noise — suppress it.
+  if (hasAny(context, [
+    "activemq", "rabbitmq", "kafka", "jms", "message broker",
+    "mysql", "postgresql", "mariadb", "mongodb", "redis", "database server",
+    "elasticsearch", "solr", "lucene", "ftp", "smtp", "ldap"
+  ])) {
+    return false;
+  }
+
   if (hasAny(context, [
     "template=", "/template", "template engine", "server-side template", "ssti",
     "flask", "jinja", "django", "werkzeug", "gunicorn", "uwsgi",
@@ -562,6 +598,18 @@ function hasSstiEvidence(context: CandidateContext): boolean {
       || /[?&](?:name|message|q|query|search|title|text|template|view|page|greet|content)=/.test(endpoint)
       || /\/(?:greet|render|template|message|search)(?:\/|\?|$)/.test(endpoint);
   });
+}
+
+// Strong SSTI evidence means we have an explicit template-engine or web-framework
+// technology signal — not just HTML responses with parameters. When strong evidence
+// is present, every user-controlled parameter is a plausible injection surface
+// and we skip the concrete-category-surface requirement.
+function hasStrongSstiEvidence(context: CandidateContext): boolean {
+  return hasAny(context, [
+    "flask", "jinja", "django", "werkzeug", "gunicorn", "uwsgi",
+    "twig", "freemarker", "velocity", "thymeleaf", "erb", "rails",
+    "handlebars", "mustache", "nunjucks", "ejs", "pug"
+  ]);
 }
 
 function hasParserHeaderInjectionEvidence(context: CandidateContext): boolean {

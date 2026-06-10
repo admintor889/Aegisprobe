@@ -65,6 +65,16 @@ const configSchema = z.object({
     baseUrl: z.string().default("https://fofa.info/api/v1"),
     maxResults: z.number().int().positive().default(200)
   }).default({}),
+  webResearch: z.object({
+    enabled: z.boolean().default(true),
+    searchProvider: z.enum(["duckduckgo-lite", "duckduckgo", "bing-rss"]).default("duckduckgo-lite"),
+    searchEndpoint: z.string().url().default("https://lite.duckduckgo.com/lite/"),
+    maxResults: z.number().int().positive().max(30).default(10),
+    timeoutMs: z.number().int().positive().default(30000),
+    maxFetchBytes: z.number().int().positive().default(2_000_000),
+    maxRetries: z.number().int().nonnegative().max(5).default(2),
+    userAgent: z.string().default("AegisProbe/1.0 research")
+  }).default({}),
   mcp: z.object({
     enabled: z.boolean().default(false),
     servers: z.array(z.object({
@@ -81,6 +91,7 @@ export type AppConfig = z.infer<typeof configSchema>;
 export type ChatMessage = {
   role: "system" | "user" | "assistant" | "tool";
   content: string | null;
+  reasoning_content?: string;
   tool_call_id?: string;
   tool_calls?: Array<{
     id: string;
@@ -97,6 +108,7 @@ export type CompleteOptions = {
 
 export type StreamEvent =
   | { kind: "text_delta"; content: string }
+  | { kind: "reasoning_delta"; content: string }
   | { kind: "tool_call_delta"; id: string; name: string; arguments: string }
   | { kind: "tool_call_finished"; id: string; name: string; arguments: string }
   | { kind: "message_stop"; stopReason: string }
@@ -373,6 +385,7 @@ export class OpenAICompatibleProvider {
               choices?: Array<{
                 delta?: {
                   content?: string;
+                  reasoning_content?: string;
                   tool_calls?: Array<{
                     index?: number;
                     id?: string;
@@ -408,6 +421,12 @@ export class OpenAICompatibleProvider {
             // Text content delta
             if (delta.content) {
               yield { kind: "text_delta", content: delta.content };
+            }
+
+            // Provider reasoning state is not user-visible, but tool-calling
+            // models require it to be replayed unchanged on later requests.
+            if (delta.reasoning_content) {
+              yield { kind: "reasoning_delta", content: delta.reasoning_content };
             }
 
             // Tool call deltas

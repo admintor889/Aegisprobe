@@ -43,6 +43,16 @@ fofa:
   baseUrl: https://fofa.info/api/v1
   maxResults: 10000
 
+webResearch:
+  enabled: true
+  searchProvider: duckduckgo-lite
+  searchEndpoint: https://lite.duckduckgo.com/lite/
+  maxResults: 10
+  timeoutMs: 30000
+  maxFetchBytes: 2000000
+  maxRetries: 2
+  userAgent: AegisProbe/1.0 research
+
 mcp:
   enabled: true
   servers:

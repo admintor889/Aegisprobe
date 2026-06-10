@@ -8,15 +8,14 @@ import { stdin as input, stdout as output } from "node:process";
 import { fileURLToPath } from "node:url";
 import { Command } from "commander";
 import iconv from "iconv-lite";
-import { MainAgent, renderWebPentestControlPlane, renderWebPentestOperatingPicture, type SafeAuthenticatedFetchDetails, type SafeReadOnlyMethod } from "@aegisprobe/core";
+import { MainAgent, type SafeAuthenticatedFetchDetails, type SafeReadOnlyMethod } from "@aegisprobe/core";
 import { describeAuthorization } from "@aegisprobe/policy";
 import { loadConfig, OpenAICompatibleProvider, resolveDictPaths } from "@aegisprobe/provider";
 import { McpManager } from "@aegisprobe/mcp";
 import { setShellMode } from "@aegisprobe/shell";
 import { extractUrlLikeTargets, parseTargetInput, type IntentExtraction, type SecurityAuthContext, type SecurityValidationAttempt, type SubAgentRecord, type SubAgentRole, type TurnEvent, type TurnResult } from "@aegisprobe/shared";
 import { EmptySkillRegistry, FileSkillRegistry } from "@aegisprobe/skills";
-import { buildAccessExposureMap, buildPayloadCandidateSet, buildPayloadRequestDraftSet, buildSecurityDecisionSupervision, buildSkillExecutionPlan, checkSecurityToolHealth, getSecurityToolInventory, loadBusinessLogicKnowledge, loadFrameworkKnowledgeIndex, loadSecurityKnowledgeIndex, renderAccessExposureMap, renderPayloadCandidateSet, renderPayloadRequestDraftSet, searchSecurityKnowledge, syncSecurityKnowledge } from "@aegisprobe/security";
-import type { PentestScope, SecurityClosureModel } from "@aegisprobe/security";
+import { buildAccessExposureMap, buildPayloadCandidateSet, buildPayloadRequestDraftSet, buildSkillExecutionPlan, checkSecurityToolHealth, getSecurityToolInventory, loadBusinessLogicKnowledge, loadFrameworkKnowledgeIndex, loadSecurityKnowledgeIndex, renderAccessExposureMap, renderPayloadCandidateSet, renderPayloadRequestDraftSet, searchSecurityKnowledge, syncSecurityKnowledge } from "@aegisprobe/security";
 import type { AuditStore } from "@aegisprobe/storage";
 import { aegisPrompt, printAegisEvent, printChatBanner } from "./terminal-ui.js";
 
@@ -540,48 +539,6 @@ async function main(): Promise<void> {
       printSubAgentRecord(record, true);
     });
 
-  program.command("agents-enqueue")
-    .description("Enqueue recommended role-specialized subagents from the current coordination plan")
-    .argument("<session-id>")
-    .option("-n, --limit <number>", "maximum subagents to enqueue", "6")
-    .action(async (sessionId: string, commandOptions: { limit: string }) => {
-      const options = program.opts<CliOptions>();
-      const agent = await createQueryAgent(options.config);
-      if (!agent.hasSession(sessionId)) {
-        throw new Error(`Session not found: ${sessionId}`);
-      }
-      console.log(await agent.enqueueRecommendedSubAgents(sessionId, parseNumberOption(commandOptions.limit, 6)));
-    });
-
-  program.command("agents-dispatch")
-    .description("Dispatch queued subagents with retry recovery and result arbitration")
-    .argument("<session-id>")
-    .option("--max <number>", "maximum queued jobs to claim", "4")
-    .option("--concurrency <number>", "foreground dispatch concurrency", "2")
-    .action(async (sessionId: string, commandOptions: { max: string; concurrency: string }) => {
-      const options = program.opts<CliOptions>();
-      const agent = await createAgent(options.config);
-      if (!agent.hasSession(sessionId)) {
-        throw new Error(`Session not found: ${sessionId}`);
-      }
-      console.log(await agent.dispatchSubAgentQueue(sessionId, {
-        maxJobs: parseNumberOption(commandOptions.max, 4),
-        concurrency: parseNumberOption(commandOptions.concurrency, 2)
-      }));
-    });
-
-  program.command("agents-arbitrate")
-    .description("Synthesize completed subagent outputs, failures, contradictions, and long-term memory")
-    .argument("<session-id>")
-    .action(async (sessionId: string) => {
-      const options = program.opts<CliOptions>();
-      const agent = await createQueryAgent(options.config);
-      if (!agent.hasSession(sessionId)) {
-        throw new Error(`Session not found: ${sessionId}`);
-      }
-      console.log(agent.arbitrateSubAgentResults(sessionId));
-    });
-
   program.command("diff")
     .description("Show audited file changes for a saved session")
     .argument("<session-id>")
@@ -628,19 +585,18 @@ async function main(): Promise<void> {
     });
 
   program.command("pentest")
-    .description("Run an autonomous URL/domain pentest loop for a new saved session")
+    .description("Start or resume a persistent security-agent conversation")
     .argument("<target>")
     .option("--active", "allow approval-gated active scanners such as nuclei/dirsearch/nmap")
     .option("--deep", "prefer a more thorough, higher-budget assessment")
     .option("--allow-cidr", "allow C-segment/CIDR discovery steps when active probing is enabled")
     .option("--rate <number>", "maximum tool rate limit per second", "2")
-    .option("--max-turns <number>", "safety-net ceiling for model turns (default 50, max 200)", "50")
     .option("--browser", "start MCP/Playwright browser tools for this pentest")
     .option("--yes", "skip authorization prompt (for automated/background runs)")
     .option("--resume", "resume an existing pentest session (target is session-id)")
     .option("--webui", "bridge events to the AegisProbe Web UI at http://127.0.0.1:3200")
     .option("--webui-url <url>", "custom Web UI URL for event bridging", "http://127.0.0.1:3200")
-    .action(async (target: string, commandOptions: { active?: boolean; deep?: boolean; allowCidr?: boolean; rate: string; maxTurns?: string; browser?: boolean; yes?: boolean; resume?: boolean; webui?: boolean; webuiUrl?: string }) => {
+    .action(async (target: string, commandOptions: { active?: boolean; deep?: boolean; allowCidr?: boolean; rate: string; browser?: boolean; yes?: boolean; resume?: boolean; webui?: boolean; webuiUrl?: string }) => {
       const options = program.opts<CliOptions>();
       const rl = createInterface({ input, output });
       const webuiUrl = commandOptions.webui ? (commandOptions.webuiUrl ?? "http://127.0.0.1:3200") : null;
@@ -665,14 +621,9 @@ async function main(): Promise<void> {
         if (commandOptions.resume) {
           const sessionId = target; // target is actually session-id in resume mode
           if (!agent.hasSession(sessionId)) throw new Error(`Session not found: ${sessionId}`);
-          console.log(`Resuming pentest session ${sessionId}...`);
-          console.log("Press Ctrl+P to pause/resume the agent during execution.\n");
+          console.log(`Resuming security session ${sessionId}...`);
           if (webuiUrl) console.log(`Bridging events to Web UI at ${webuiUrl}\n`);
-          const pauseState = createPauseController(rl);
-          autoApprove.active = true;
-          const summary = await agent.resumePentestPipeline(sessionId, pauseState);
-          autoApprove.active = false;
-          console.log(summary);
+          await chatLoop(agent, sessionId, rl, projectRootFromConfig(options.config), autoApprove);
           console.log(`Session saved: ${sessionId}`);
           return;
         }
@@ -687,30 +638,18 @@ async function main(): Promise<void> {
           }
         }
         const sessionId = agent.createSession(`pentest: ${target}`);
-        console.log("Press Ctrl+P to pause/resume the agent during execution.\n");
         if (webuiUrl) console.log(`Bridging events to Web UI at ${webuiUrl}\n`);
-        const pauseState = createPauseController(rl);
-        autoApprove.active = true;
-        const summary = await agent.executePentestPipeline(sessionId, target, scopeOptionsFromCommand(commandOptions), pauseState);
+        autoApprove.active = Boolean(commandOptions.yes);
+        const turnResult = await runChatTurn(agent, sessionId, target, rl);
+        if (!turnResult.ok) {
+          process.exitCode = 1;
+        }
         autoApprove.active = false;
-        console.log(summary);
         console.log(`Session saved: ${sessionId}`);
       } finally {
         rl.close();
         await stopMcpManagerForCleanup();
       }
-    });
-
-  program.command("workflow")
-    .description("Show security workflows and phase tasks for a saved session")
-    .argument("<session-id>")
-    .action(async (sessionId: string) => {
-      const options = program.opts<CliOptions>();
-      const agent = await createQueryAgent(options.config);
-      if (!agent.hasSession(sessionId)) {
-        throw new Error(`Session not found: ${sessionId}`);
-      }
-      printSecurityWorkflows(agent, sessionId);
     });
 
   program.command("runs")
@@ -723,18 +662,6 @@ async function main(): Promise<void> {
         throw new Error(`Session not found: ${sessionId}`);
       }
       printSecurityToolRuns(agent, sessionId);
-    });
-
-  program.command("graph")
-    .description("Show derived security asset graph and recommended next actions for a saved session")
-    .argument("<session-id>")
-    .action(async (sessionId: string) => {
-      const options = program.opts<CliOptions>();
-      const agent = await createQueryAgent(options.config);
-      if (!agent.hasSession(sessionId)) {
-        throw new Error(`Session not found: ${sessionId}`);
-      }
-      printSecurityAssetGraph(agent, sessionId);
     });
 
   program.command("evidence")
@@ -763,21 +690,6 @@ async function main(): Promise<void> {
       printGraphHypotheses(agent, sessionId, commandOptions.all);
     });
 
-  program.command("hint")
-    .description("Inject a human override into a pentest session (skip/focus/constraint/knowledge/correction)")
-    .argument("<session-id>")
-    .argument("<content>")
-    .option("--kind <kind>", "override kind", "knowledge")
-    .option("--relates-to <id>", "related evidence or hypothesis id")
-    .action(async (sessionId: string, content: string, commandOptions: { kind?: string; relatesTo?: string }) => {
-      const options = program.opts<CliOptions>();
-      const agent = await createQueryAgent(options.config);
-      if (!agent.hasSession(sessionId)) {
-        throw new Error(`Session not found: ${sessionId}`);
-      }
-      console.log(agent.addGraphOverride(sessionId, content, commandOptions.kind, commandOptions.relatesTo));
-    });
-
   program.command("graph-state")
     .description("Show full attack graph state (YAML dump) for a saved session")
     .argument("<session-id>")
@@ -788,160 +700,6 @@ async function main(): Promise<void> {
         throw new Error(`Session not found: ${sessionId}`);
       }
       console.log(agent.renderGraphState(sessionId));
-    });
-
-  program.command("graph-dispatch")
-    .description("Analyze attack graph and plan next agent dispatches (Stigmergy-driven)")
-    .argument("<session-id>")
-    .action(async (sessionId: string) => {
-      const options = program.opts<CliOptions>();
-      const agent = await createQueryAgent(options.config);
-      if (!agent.hasSession(sessionId)) {
-        throw new Error(`Session not found: ${sessionId}`);
-      }
-      console.log(agent.planGraphDispatch(sessionId));
-    });
-
-  program.command("graph-context")
-    .description("Show Stigmergy decision context (graph snapshot for LLM)")
-    .argument("<session-id>")
-    .action(async (sessionId: string) => {
-      const options = program.opts<CliOptions>();
-      const agent = await createQueryAgent(options.config);
-      if (!agent.hasSession(sessionId)) {
-        throw new Error(`Session not found: ${sessionId}`);
-      }
-      console.log(agent.buildGraphDecisionContext(sessionId));
-    });
-
-  program.command("roles-v2")
-    .description("List simplified v2 agent roles (Stigmergy model)")
-    .action(async () => {
-      const options = program.opts<CliOptions>();
-      const agent = await createQueryAgent(options.config);
-      console.log(agent.listV2Roles());
-    });
-
-  program.command("queue")
-    .description("Show prioritized security decision queue for a saved session")
-    .argument("<session-id>")
-    .action(async (sessionId: string) => {
-      const options = program.opts<CliOptions>();
-      const agent = await createQueryAgent(options.config);
-      if (!agent.hasSession(sessionId)) {
-        throw new Error(`Session not found: ${sessionId}`);
-      }
-      printSecurityDecisionQueue(agent, sessionId);
-    });
-
-  program.command("supervisor")
-    .description("Show decision-loop supervision, repeated-tool detection, and strategy pivot recommendations")
-    .argument("<session-id>")
-    .action(async (sessionId: string) => {
-      const options = program.opts<CliOptions>();
-      const agent = await createQueryAgent(options.config);
-      if (!agent.hasSession(sessionId)) {
-        throw new Error(`Session not found: ${sessionId}`);
-      }
-      printDecisionSupervisor(agent, sessionId);
-    });
-
-  program.command("objective")
-    .description("Show goal-driven impact model for business logic, admin control-plane, and server-risk paths")
-    .argument("<session-id>")
-    .action(async (sessionId: string) => {
-      const options = program.opts<CliOptions>();
-      const agent = await createQueryAgent(options.config);
-      if (!agent.hasSession(sessionId)) {
-        throw new Error(`Session not found: ${sessionId}`);
-      }
-      printSecurityObjectiveModel(agent, sessionId);
-    });
-
-  program.command("closure")
-    .description("Show closed-loop validation, business workflow, browser, CVE, and subagent operating model")
-    .argument("<session-id>")
-    .action(async (sessionId: string) => {
-      const options = program.opts<CliOptions>();
-      const agent = await createQueryAgent(options.config);
-      if (!agent.hasSession(sessionId)) {
-        throw new Error(`Session not found: ${sessionId}`);
-      }
-      printSecurityClosureModel(agent.buildSecurityClosureModel(sessionId));
-    });
-
-  program.command("web-control")
-    .description("Show evidence-driven Web/API operating picture and readiness guards")
-    .argument("<session-id>")
-    .option("--workflow <workflow-id>", "security workflow id to scope the control plane")
-    .action(async (sessionId: string, commandOptions: { workflow?: string }) => {
-      const options = program.opts<CliOptions>();
-      const agent = await createQueryAgent(options.config);
-      if (!agent.hasSession(sessionId)) {
-        throw new Error(`Session not found: ${sessionId}`);
-      }
-      console.log(renderWebPentestOperatingPicture(agent.buildWebPentestOperatingPicture(sessionId, commandOptions.workflow)));
-      console.log("");
-      console.log(renderWebPentestControlPlane(agent.buildWebPentestControlPlane(sessionId, commandOptions.workflow)));
-    });
-
-  program.command("coordination")
-    .description("Show recommended security subagent coordination plan for a saved session")
-    .argument("<session-id>")
-    .action(async (sessionId: string) => {
-      const options = program.opts<CliOptions>();
-      const agent = await createQueryAgent(options.config);
-      if (!agent.hasSession(sessionId)) {
-        throw new Error(`Session not found: ${sessionId}`);
-      }
-      printSubAgentCoordinationPlan(agent, sessionId);
-    });
-
-  program.command("queue-run")
-    .description("Execute the next or selected security decision queue item for a saved session")
-    .argument("<session-id>")
-    .argument("[item-id]", "decision queue item id, or next", "next")
-    .option("--active", "allow approval-gated active validation for this queue execution")
-    .option("--deep", "prefer a more thorough, higher-budget queue execution")
-    .option("--allow-cidr", "allow C-segment/CIDR discovery when active probing is enabled")
-    .option("--rate <number>", "maximum tool rate limit per second", "2")
-    .action(async (sessionId: string, itemId: string, commandOptions: { active?: boolean; deep?: boolean; allowCidr?: boolean; rate: string }) => {
-      const options = program.opts<CliOptions>();
-      const rl = createInterface({ input, output });
-      try {
-        if (commandOptions.active && !await confirmActiveAuthorization(rl)) {
-          console.log("Active authorization not confirmed. Queue item not executed.");
-          return;
-        }
-        const agent = await createAgent(options.config, rl, printRealtimeEvent);
-        if (!agent.hasSession(sessionId)) {
-          throw new Error(`Session not found: ${sessionId}`);
-        }
-        const summary = await agent.executeSecurityDecisionQueueItem(sessionId, itemId, scopeOptionsFromCommand(commandOptions));
-        console.log(summary);
-      } finally {
-        rl.close();
-      }
-    });
-
-  program.command("loop")
-    .description("Run the security decision loop until no executable item remains or max iterations is reached")
-    .argument("<session-id>")
-    .option("--active", "allow approval-gated active validation for this loop")
-    .option("--deep", "prefer a more thorough, higher-budget loop")
-    .option("--allow-cidr", "allow C-segment/CIDR discovery when active probing is enabled")
-    .option("--rate <number>", "maximum tool rate limit per second", "2")
-    .option("--max <number>", "maximum loop iterations", "5")
-    .action(async (sessionId: string, commandOptions: { active?: boolean; deep?: boolean; allowCidr?: boolean; rate: string; max: string }) => {
-      const options = program.opts<CliOptions>();
-      const agent = await createAgent(options.config);
-      if (!agent.hasSession(sessionId)) {
-        throw new Error(`Session not found: ${sessionId}`);
-      }
-      console.log(await agent.runSecurityDecisionLoop(sessionId, {
-        ...scopeOptionsFromCommand(commandOptions),
-        maxIterations: parseNumberOption(commandOptions.max, 5)
-      }));
     });
 
   program.command("browser-login")
@@ -1569,55 +1327,6 @@ async function createQueryAgent(configPath?: string): Promise<MainAgent> {
   return await createAgent(configPath, undefined, undefined, undefined, { enableMcp: false });
 }
 
-type PauseController = { paused: boolean; instruction: string };
-
-function createPauseController(rl: ReturnType<typeof createInterface>): PauseController {
-  const state: PauseController = { paused: false, instruction: "" };
-  if (!input.isTTY) return state;
-
-  const wasRaw = process.stdin.isRaw ?? false;
-  try {
-    process.stdin.setRawMode(true);
-    process.stdin.resume();
-  } catch { /* not a TTY */ }
-
-  const onData = (data: Buffer) => {
-    // Ctrl+P = ASCII 16
-    if (data[0] === 16) {
-      if (!state.paused) {
-        state.paused = true;
-        process.stdin.setRawMode(false);
-        output.write("\n⏸  PAUSED. Type instructions (Enter=resume, /exit=stop): ");
-      }
-    }
-  };
-
-  process.stdin.on("data", onData);
-
-  // Poll for resume via readline
-  const poll = async () => {
-    while (state.paused) {
-      const line = await rl.question("");
-      if (line.trim() === "/exit") {
-        state.instruction = "/exit";
-        state.paused = false;
-        break;
-      }
-      if (line.trim()) {
-        state.instruction = line.trim();
-      }
-      state.paused = false;
-      try { process.stdin.setRawMode(true); } catch { /* ok */ }
-      output.write("▶ RESUMED.\n");
-    }
-  };
-
-  // Don't await — it blocks on the question
-  poll().catch(() => { /* stdin closed */ });
-
-  return state;
-}
-
 async function confirmAuthorization(rl: ReturnType<typeof createInterface>, intent: IntentExtraction): Promise<boolean> {
   if (intent.intent === "conversation" && intent.targets.length === 0 && intent.filePaths.length === 0) {
     return true;
@@ -1631,60 +1340,12 @@ async function confirmAuthorization(rl: ReturnType<typeof createInterface>, inte
   return answer.trim().toUpperCase() === "YES";
 }
 
-async function confirmActiveAuthorization(rl: ReturnType<typeof createInterface>): Promise<boolean> {
-  const answer = await askLine(
-    rl,
-    "Confirm written authorization for active validation, allowed targets, rate limit, and stop conditions. Type YES to continue: "
-  );
-  return answer.trim().toUpperCase() === "YES";
-}
-
-async function askDirectPentestScope(rl: ReturnType<typeof createInterface>, inputText: string): Promise<Partial<PentestScope>> {
-  if (/\b(?:safe|read.?only|passive|no active|no scan)\b|只读|被动|不要主动|不扫端口/i.test(inputText)) {
-    return { allowActiveProbing: false, allowCidrDiscovery: false, intensity: "safe", scanProfile: "quick", rateLimitPerSecond: 2 };
-  }
-  const deep = /\bdeep\b|深度|全量|全面/i.test(inputText);
-  const activeAnswer = await askLine(
-    rl,
-    "Enable active probing for this authorized target (port/content discovery with approval before every command)? Type YES for active, anything else for safe mode: "
-  );
-  const active = activeAnswer.trim().toUpperCase() === "YES";
-  if (!active) {
-    return { allowActiveProbing: false, allowCidrDiscovery: false, intensity: "safe", scanProfile: deep ? "deep" : "quick", rateLimitPerSecond: 2 };
-  }
-  const cidrAnswer = await askLine(
-    rl,
-    "Allow C-segment/CIDR discovery too? Type YES only if this network range is explicitly authorized: "
-  );
-  return {
-    allowActiveProbing: true,
-    allowCidrDiscovery: cidrAnswer.trim().toUpperCase() === "YES",
-    intensity: "active",
-    scanProfile: deep ? "deep" : "quick",
-    rateLimitPerSecond: 5
-  };
-}
-
 async function runOnce(target: string, options: CliOptions): Promise<void> {
   const rl = createInterface({ input, output });
   try {
     const autoApprove = { active: true }; // auto-approve for non-interactive runs
     const agent = await createAgent(options.config, rl, printRealtimeEvent, autoApprove);
 
-    // Only auto-pentest when input is PRIMARILY a URL/domain (not a complex instruction)
-    const directTarget = directPentestTarget(target);
-    const isConversational = target.length > 100 || /搜索|查找|分析|挑选|使用|帮我|请|步骤/.test(target);
-    if (directTarget && !isConversational) {
-      const sessionId = agent.createSession(`run: ${directTarget.normalized}`);
-      const scope = { allowActiveProbing: true, allowCidrDiscovery: false, intensity: "active" as const, scanProfile: "deep" as const, rateLimitPerSecond: 5 };
-      console.log(`Starting autonomous pentest on: ${directTarget.normalized}`);
-      const summary = await agent.executePentestPipeline(sessionId, directTarget.normalized, scope);
-      console.log(summary);
-      console.log(`Session: ${sessionId}`);
-      return;
-    }
-
-    // Otherwise, run as a conversation turn (streaming)
     const sessionId = agent.createSession(`run: ${target.slice(0, 80)}`);
     console.log(`Session: ${sessionId}`);
     console.log("");
@@ -1693,12 +1354,11 @@ async function runOnce(target: string, options: CliOptions): Promise<void> {
     try {
       await withInterrupt(interrupt, async (signal) => {
         let started = false;
-        for await (const event of agent.runConversationTurn(sessionId, target, { signal, maxToolRounds: 15 })) {
+        for await (const event of agent.runConversationTurn(sessionId, target, { signal })) {
           switch (event.kind) {
             case "text_start": started = true; output.write("\n"); break;
             case "text_delta": output.write(event.content); break;
             case "text_end": output.write("\n"); break;
-            case "tool_call_start": output.write(`\n🔧 Calling ${event.name}...\n`); break;
             case "tool_execution_start": break;
             case "tool_execution_end":
               if (event.error) {
@@ -1739,7 +1399,7 @@ async function startChat(options: CliOptions, resumeSessionId?: string): Promise
       if (!agent.hasSession(resumeSessionId)) {
         throw new Error(`Session not found: ${resumeSessionId}`);
       }
-  console.log(`AegisProbe resumed session ${resumeSessionId}. Type /exit to quit. Type /shell <command>, /probe <target> [probe], /pentest <target> [--active] [--deep] [--allow-cidr], /tools, /agents, /agents-enqueue, /agents-dispatch, /agents-arbitrate, /workflow, /runs, /graph, /queue, /supervisor, /objective, /closure, /web-control, /coordination, /queue-run [item-id|next] [--active] [--deep] [--allow-cidr], /loop [--max n] [--active] [--deep], /browser-forms [auth-or-url] [--max-pages n], /auth-list, /authz-plan, /business-plan, /business-run [case-id] [--auth name], /business-compare [case-id] --left a --right b, /validation-plan, /validate [id|next], /validations, /checklist, /findings, /report, /diff, /context, /agent <role> <task>, /agent-bg <role> <task>, /agent-info <id>, /wait-agent <id>, or /close-agent <id>.`);
+  console.log(`AegisProbe resumed session ${resumeSessionId}. Type /help for commands or continue the conversation directly.`);
       await chatLoop(agent, resumeSessionId, rl, projectRoot, autoApprove);
       console.log(`Session saved: ${resumeSessionId}`);
       return;
@@ -1752,28 +1412,6 @@ async function startChat(options: CliOptions, resumeSessionId?: string): Promise
       return;
     }
 
-    const directTarget = directPentestTarget(first);
-    if (directTarget) {
-      const intent = buildDirectTargetIntent(directTarget.normalized, "security_assessment");
-      printIntent(intent);
-      const authorized = await confirmAuthorization(rl, intent);
-      if (!authorized) {
-        console.log("Authorization not confirmed. No session created.");
-        return;
-      }
-      const sessionId = agent.createSession(`chat: ${directTarget.normalized}`);
-      console.log(`Session created: ${sessionId}`);
-      const scope = await askDirectPentestScope(rl, first);
-      console.log(`Direct URL/domain input detected. Running autonomous pentest loop: active=${Boolean(scope.allowActiveProbing)}, rate=${scope.rateLimitPerSecond ?? 2}/s.`);
-      autoApprove.active = true;
-      const summary = await agent.executePentestPipeline(sessionId, directTarget.normalized, scope);
-      autoApprove.active = false;
-      console.log(summary);
-      await chatLoop(agent, sessionId, rl, projectRoot, autoApprove);
-      console.log(`Session saved: ${sessionId}`);
-      return;
-    }
-
     const intent = await agent.understandUserInput(first);
     printIntent(intent);
     const authorized = await confirmAuthorization(rl, intent);
@@ -1783,7 +1421,7 @@ async function startChat(options: CliOptions, resumeSessionId?: string): Promise
     }
 
     const sessionId = agent.createSession(`chat: ${first.slice(0, 80)}`);
-    await runTaskLoop(agent, sessionId, first, rl);
+    await runChatTurn(agent, sessionId, first, rl);
     await chatLoop(agent, sessionId, rl, projectRoot, autoApprove);
     console.log(`Session saved: ${sessionId}`);
   } finally {
@@ -1847,9 +1485,11 @@ async function runChatTurn(
   sessionId: string,
   userInput: string,
   rl: ReturnType<typeof createInterface>
-): Promise<void> {
+): Promise<{ ok: boolean }> {
   // Set up interrupt for this turn
   const interrupt = createInterruptController(rl);
+  let completed = false;
+  let failed = false;
 
   try {
     await withInterrupt(interrupt, async (signal) => {
@@ -1866,9 +1506,6 @@ async function runChatTurn(
           case "text_end":
             output.write("\n");
             break;
-          case "tool_call_start":
-            output.write(`\n🔧 Calling ${event.name}...\n`);
-            break;
           case "tool_execution_start":
             output.write(`  Running ${event.name}...`);
             break;
@@ -1880,14 +1517,17 @@ async function runChatTurn(
             }
             break;
           case "turn_complete":
+            completed = true;
             if (!started) {
               output.write("\n(No response)\n");
             }
             break;
           case "turn_aborted":
+            failed = true;
             output.write("Turn aborted.\n");
             break;
           case "turn_error":
+            failed = true;
             output.write(`\nError: ${event.error}\n`);
             break;
         }
@@ -1903,6 +1543,7 @@ async function runChatTurn(
       }
     }
   }
+  return { ok: completed && !failed };
 }
 
 function printChatHelp(): void {
@@ -1919,7 +1560,7 @@ AegisProbe Chat Commands
   /tools --check           Check tool health
 
   Pentest:
-  /pentest <target> [...]  Run autonomous pentest pipeline
+  /pentest <target>        Send a target to the current agent thread
   /probe <target> [type]   Quick security probe (basic_recon|dns|http_headers)
 
   Session:
@@ -1961,23 +1602,6 @@ async function chatLoop(agent: MainAgent, sessionId: string, rl: ReturnType<type
       printChatHelp();
       continue;
     }
-    const directTarget = directPentestTarget(trimmed);
-    if (directTarget) {
-      const intent = buildDirectTargetIntent(directTarget.normalized, "security_assessment");
-      printIntent(intent);
-      const authorized = await confirmAuthorization(rl, intent);
-      if (!authorized) {
-        console.log("Authorization not confirmed. Pentest loop was not started.");
-        continue;
-      }
-      const scope = await askDirectPentestScope(rl, trimmed);
-      console.log(`Direct URL/domain input detected. Running autonomous pentest loop: active=${Boolean(scope.allowActiveProbing)}, rate=${scope.rateLimitPerSecond ?? 2}/s.`);
-      if (autoApprove) autoApprove.active = true;
-      const summary = await agent.executePentestPipeline(sessionId, directTarget.normalized, scope);
-      if (autoApprove) autoApprove.active = false;
-      console.log(summary);
-      continue;
-    }
     if (trimmed.startsWith("/shell ")) {
       await agent.executeCommand(sessionId, trimmed.slice("/shell ".length));
       continue;
@@ -1996,48 +1620,14 @@ async function chatLoop(agent: MainAgent, sessionId: string, rl: ReturnType<type
       const parts = trimmed.slice("/pentest ".length).trim().split(/\s+/).filter(Boolean);
       const target = parts.find((part) => !part.startsWith("--"));
       if (!target) {
-        console.log("Usage: /pentest <target> [--active] [--deep] [--allow-cidr] [--rate <n>]");
+        console.log("Usage: /pentest <target>");
         continue;
       }
-      const active = parts.includes("--active");
-      if (active && !await confirmActiveAuthorization(rl)) {
-        console.log("Active authorization not confirmed. Pipeline was not started.");
-        continue;
-      }
-      const rateIndex = parts.indexOf("--rate");
-      if (autoApprove) autoApprove.active = true;
-      const summary = await agent.executePentestPipeline(sessionId, target, {
-        allowActiveProbing: active,
-        allowCidrDiscovery: parts.includes("--allow-cidr"),
-        intensity: active ? "active" : "safe",
-        scanProfile: parts.includes("--deep") ? "deep" : "quick",
-        rateLimitPerSecond: rateIndex >= 0 ? Number.parseInt(parts[rateIndex + 1] ?? "2", 10) : 2
-      });
-      if (autoApprove) autoApprove.active = false;
-      console.log(summary);
+      await runChatTurn(agent, sessionId, target, rl);
       continue;
     }
     if (trimmed === "/agents") {
       printSubAgents(agent, sessionId);
-      continue;
-    }
-    if (trimmed.startsWith("/agents-enqueue")) {
-      const limit = parseNumberOption(trimmed.split(/\s+/)[1], 6);
-      console.log(await agent.enqueueRecommendedSubAgents(sessionId, limit));
-      continue;
-    }
-    if (trimmed.startsWith("/agents-dispatch")) {
-      const parts = trimmed.split(/\s+/).filter(Boolean);
-      const maxIndex = parts.indexOf("--max");
-      const concurrencyIndex = parts.indexOf("--concurrency");
-      console.log(await agent.dispatchSubAgentQueue(sessionId, {
-        maxJobs: maxIndex >= 0 ? parseNumberOption(parts[maxIndex + 1], 4) : 4,
-        concurrency: concurrencyIndex >= 0 ? parseNumberOption(parts[concurrencyIndex + 1], 2) : 2
-      }));
-      continue;
-    }
-    if (trimmed === "/agents-arbitrate") {
-      console.log(agent.arbitrateSubAgentResults(sessionId));
       continue;
     }
     if (trimmed === "/tools") {
@@ -2048,84 +1638,8 @@ async function chatLoop(agent: MainAgent, sessionId: string, rl: ReturnType<type
       printToolInventory(true, projectRoot);
       continue;
     }
-    if (trimmed === "/workflow") {
-      printSecurityWorkflows(agent, sessionId);
-      continue;
-    }
     if (trimmed === "/runs") {
       printSecurityToolRuns(agent, sessionId);
-      continue;
-    }
-    if (trimmed === "/graph") {
-      printSecurityAssetGraph(agent, sessionId);
-      continue;
-    }
-    if (trimmed === "/queue") {
-      printSecurityDecisionQueue(agent, sessionId);
-      continue;
-    }
-    if (trimmed === "/supervisor") {
-      printDecisionSupervisor(agent, sessionId);
-      continue;
-    }
-    if (trimmed === "/objective") {
-      printSecurityObjectiveModel(agent, sessionId);
-      continue;
-    }
-    if (trimmed === "/closure") {
-      printSecurityClosureModel(agent.buildSecurityClosureModel(sessionId));
-      continue;
-    }
-    if (trimmed === "/web-control") {
-      console.log(renderWebPentestOperatingPicture(agent.buildWebPentestOperatingPicture(sessionId)));
-      console.log("");
-      console.log(renderWebPentestControlPlane(agent.buildWebPentestControlPlane(sessionId)));
-      continue;
-    }
-    if (trimmed === "/coordination") {
-      printSubAgentCoordinationPlan(agent, sessionId);
-      continue;
-    }
-    if (trimmed.startsWith("/queue-run")) {
-      const parts = trimmed.slice("/queue-run".length).trim().split(/\s+/).filter(Boolean);
-      const itemId = parts.find((part) => !part.startsWith("--")) ?? "next";
-      const rateIndex = parts.indexOf("--rate");
-      const active = parts.includes("--active");
-      if (active && !await confirmActiveAuthorization(rl)) {
-        console.log("Active authorization not confirmed. Queue item not executed.");
-        continue;
-      }
-      if (autoApprove) autoApprove.active = true;
-      const summary = await agent.executeSecurityDecisionQueueItem(sessionId, itemId, {
-        allowActiveProbing: active,
-        allowCidrDiscovery: parts.includes("--allow-cidr"),
-        intensity: active ? "active" : "safe",
-        scanProfile: parts.includes("--deep") ? "deep" : "quick",
-        rateLimitPerSecond: rateIndex >= 0 ? Number.parseInt(parts[rateIndex + 1] ?? "2", 10) : 2
-      });
-      if (autoApprove) autoApprove.active = false;
-      console.log(summary);
-      continue;
-    }
-    if (trimmed.startsWith("/loop")) {
-      const parts = trimmed.slice("/loop".length).trim().split(/\s+/).filter(Boolean);
-      const rateIndex = parts.indexOf("--rate");
-      const maxIndex = parts.indexOf("--max");
-      const active = parts.includes("--active");
-      if (active && !await confirmActiveAuthorization(rl)) {
-        console.log("Active authorization not confirmed. Decision loop not executed.");
-        continue;
-      }
-      if (autoApprove) autoApprove.active = true;
-      console.log(await agent.runSecurityDecisionLoop(sessionId, {
-        allowActiveProbing: active,
-        allowCidrDiscovery: parts.includes("--allow-cidr"),
-        intensity: active ? "active" : "safe",
-        scanProfile: parts.includes("--deep") ? "deep" : "quick",
-        rateLimitPerSecond: rateIndex >= 0 ? parseNumberOption(parts[rateIndex + 1], 2) : 2,
-        maxIterations: maxIndex >= 0 ? parseNumberOption(parts[maxIndex + 1], 5) : 5
-      }));
-      if (autoApprove) autoApprove.active = false;
       continue;
     }
     if (trimmed.startsWith("/browser-forms")) {
@@ -2321,19 +1835,6 @@ function normalizeProbe(probe: string | undefined): "basic_recon" | "dns" | "htt
   return probe === "dns" || probe === "http_headers" || probe === "basic_recon" ? probe : "basic_recon";
 }
 
-function scopeOptionsFromCommand(commandOptions: { active?: boolean; deep?: boolean; allowCidr?: boolean; rate?: string; maxTurns?: string }): Partial<PentestScope> {
-  const rate = Number.parseInt(commandOptions.rate ?? "2", 10);
-  const maxTurns = Number.parseInt(commandOptions.maxTurns ?? "6", 10);
-  return {
-    allowActiveProbing: Boolean(commandOptions.active),
-    allowCidrDiscovery: Boolean(commandOptions.allowCidr),
-    intensity: commandOptions.active ? "active" : "safe",
-    scanProfile: commandOptions.deep ? "deep" : "quick",
-    rateLimitPerSecond: Number.isFinite(rate) && rate > 0 ? rate : 2,
-    maxModelTurns: Number.isFinite(maxTurns) && maxTurns > 0 ? maxTurns : 6
-  };
-}
-
 function parseNumberOption(value: string | undefined, fallback: number): number {
   const parsed = Number.parseInt(value ?? "", 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
@@ -2488,218 +1989,6 @@ function printSecurityValidationAttempts(attempts: SecurityValidationAttempt[]):
     console.log(`  rationale: ${attempt.rationale}`);
     if (attempt.evidenceIds.length > 0) {
       console.log(`  evidence: ${attempt.evidenceIds.join(", ")}`);
-    }
-  }
-}
-
-function printSecurityAssetGraph(agent: MainAgent, sessionId: string): void {
-  const graph = agent.buildSecurityAssetGraph(sessionId);
-  if (graph.nodes.length === 0) {
-    console.log("No security asset graph nodes found.");
-    return;
-  }
-  console.log("Security Asset Graph");
-  for (const node of graph.nodes) {
-    const tech = node.technologies.length > 0 ? ` | tech:${node.technologies.map((item) => item.version ? `${item.name} ${item.version}` : item.name).join(",")}` : "";
-    const cves = node.cveMatches.length > 0 ? ` | cve:${node.cveMatches.length}` : "";
-    const findings = node.findings.length > 0 ? ` | findings:${node.findings.length}` : "";
-    console.log(`- ${node.kind} | ${node.confidence} | ${node.value} | sources:${node.sources.join(",")}${tech}${cves}${findings} | evidence:${node.evidenceCount}`);
-  }
-  if (graph.edges.length > 0) {
-    console.log("Graph Edges");
-    for (const edge of graph.edges) {
-      console.log(`- ${edge.relation}: ${edge.from} -> ${edge.to}`);
-    }
-  }
-  if (graph.nextActions.length > 0) {
-    console.log("Recommended Next Actions");
-    for (const action of graph.nextActions) {
-      console.log(`- ${action}`);
-    }
-  }
-}
-
-function printSecurityDecisionQueue(agent: MainAgent, sessionId: string): void {
-  const queue = agent.buildSecurityDecisionQueue(sessionId);
-  if (queue.items.length === 0) {
-    console.log("No security decision queue items found.");
-    return;
-  }
-  console.log(`Security Decision Queue (${queue.generatedAt})`);
-  for (const item of queue.items) {
-    const tool = item.toolId ? ` | tool:${item.toolId}` : "";
-    const fallback = item.fallbackFor ? ` | fallback:${item.fallbackFor}` : "";
-    const blocked = item.blockedBy ? ` | blocked:${item.blockedBy}` : "";
-    const score = item.score === undefined ? "" : ` | score:${item.score}`;
-    const confidence = item.confidence ? ` | conf:${item.confidence}` : "";
-    const attempts = item.attemptCount ? ` | attempts:${item.attemptCount}` : "";
-    console.log(`- ${item.priority}${score}${confidence}${attempts} | ${item.phase} | ${item.actionType}${tool}${fallback}${blocked} | ${item.title}`);
-    console.log(`  target: ${item.target}`);
-    console.log(`  reason: ${item.reason}`);
-    if (item.failureMemory && item.failureMemory.length > 0) {
-      console.log(`  failure memory: ${item.failureMemory.join("; ")}`);
-    }
-    if (item.prerequisites.length > 0) {
-      console.log(`  prerequisites: ${item.prerequisites.join("; ")}`);
-    }
-    if (item.expectedEvidence.length > 0) {
-      console.log(`  expected evidence: ${item.expectedEvidence.join("; ")}`);
-    }
-  }
-}
-
-function printDecisionSupervisor(agent: MainAgent, sessionId: string): void {
-  const queue = agent.buildSecurityDecisionQueue(sessionId);
-  const supervision = buildSecurityDecisionSupervision({
-    queue,
-    graph: agent.buildSecurityAssetGraph(sessionId),
-    toolRuns: agent.listSecurityToolRuns(sessionId),
-    checks: agent.listSecurityChecks(sessionId)
-  });
-  console.log(`Decision Supervisor (${supervision.generatedAt})`);
-  console.log(`- level: ${supervision.level}`);
-  console.log(`- summary: ${supervision.summary}`);
-  if (supervision.progressSignals.length > 0) {
-    console.log("Progress Signals");
-    for (const signal of supervision.progressSignals) {
-      console.log(`- ${signal}`);
-    }
-  }
-  if (supervision.stallSignals.length > 0) {
-    console.log("Stall Signals");
-    for (const signal of supervision.stallSignals) {
-      console.log(`- ${signal}`);
-    }
-  }
-  if (supervision.repeatedTools.length > 0) {
-    console.log("Repeated Tools");
-    for (const tool of supervision.repeatedTools) {
-      console.log(`- ${tool.toolId} | attempts:${tool.attempts} | last:${tool.lastStatus}${tool.failureCategory ? `/${tool.failureCategory}` : ""}`);
-    }
-  }
-  console.log("Recommended Actions");
-  for (const action of supervision.recommendedActions) {
-    console.log(`- ${action}`);
-  }
-  if (supervision.suppressItemIds.length > 0) {
-    console.log(`Suppressed Queue Items: ${supervision.suppressItemIds.join(", ")}`);
-  }
-}
-
-function printSecurityObjectiveModel(agent: MainAgent, sessionId: string): void {
-  const model = agent.buildSecurityObjectiveModel(sessionId);
-  console.log(`Security Objective Model (${model.generatedAt})`);
-  console.log(`- target: ${model.target}`);
-  console.log(`- status: ${model.overallStatus}`);
-  console.log(`- summary: ${model.summary}`);
-  console.log("Objectives");
-  for (const objective of model.objectives) {
-    console.log(`- ${objective.id} | ${objective.status} | score:${objective.score} | confidence:${objective.confidence} | ${objective.title}`);
-    if (objective.evidence.length > 0) {
-      console.log(`  evidence: ${objective.evidence.slice(0, 4).join(" | ")}`);
-    }
-    if (objective.blockers.length > 0) {
-      console.log(`  blockers: ${objective.blockers.join(" | ")}`);
-    }
-    if (objective.nextActions.length > 0) {
-      console.log(`  next: ${objective.nextActions.slice(0, 2).join(" | ")}`);
-    }
-    if (objective.mappedQueueItemIds.length > 0) {
-      console.log(`  queue: ${objective.mappedQueueItemIds.slice(0, 5).join(", ")}`);
-    }
-  }
-  if (model.attackPaths.length > 0) {
-    console.log("Attack Paths");
-    for (const path of model.attackPaths) {
-      console.log(`- ${path.id} | ${path.status} | score:${path.score} | ${path.title}`);
-      console.log(`  rationale: ${path.rationale}`);
-      console.log(`  stop: ${path.stopConditions.slice(0, 2).join(" | ")}`);
-    }
-  }
-  if (model.requiredUserContext.length > 0) {
-    console.log("Required User Context");
-    for (const question of model.requiredUserContext.slice(0, 6)) {
-      console.log(`- ${question}`);
-    }
-  }
-  if (model.nextBestActions.length > 0) {
-    console.log("Next Best Actions");
-    for (const action of model.nextBestActions.slice(0, 6)) {
-      console.log(`- ${action}`);
-    }
-  }
-}
-
-function printSecurityClosureModel(model: SecurityClosureModel): void {
-  console.log(`Security Closure Model (${model.generatedAt})`);
-  console.log(`- target: ${model.target}`);
-  console.log(`- status: ${model.status}`);
-  console.log(`- summary: ${model.summary}`);
-  console.log("Next Best Actions");
-  for (const action of model.nextBestActions.slice(0, 8)) {
-    console.log(`- ${action}`);
-  }
-  console.log("Validation Closure");
-  console.log(`- status: ${model.validationPlan.status}`);
-  console.log(`- summary: ${model.validationPlan.summary}`);
-  for (const candidate of model.validationPlan.candidates.slice(0, 8)) {
-    const blocked = candidate.blockedBy ? ` | blocked:${candidate.blockedBy}` : "";
-    console.log(`- ${candidate.id} | ${candidate.state}/${candidate.confidence} | ${candidate.priority}${blocked} | ${candidate.title}`);
-    console.log(`  next: ${candidate.nextAction}`);
-    if (candidate.falsePositiveGuards.length > 0) {
-      console.log(`  guards: ${candidate.falsePositiveGuards.slice(0, 3).join(" | ")}`);
-    }
-  }
-  console.log("Business Workflow Graph");
-  console.log(`- nodes: ${model.businessWorkflowGraph.nodes.length}`);
-  console.log(`- edges: ${model.businessWorkflowGraph.edges.length}`);
-  for (const node of model.businessWorkflowGraph.nodes.slice(0, 8)) {
-    console.log(`- ${node.id} | ${node.category}/${node.sensitivity} | ${node.url}`);
-    if (node.signals.length > 0) {
-      console.log(`  signals: ${node.signals.join(", ")}`);
-    }
-  }
-  if (model.businessWorkflowGraph.gaps.length > 0) {
-    console.log("Workflow Gaps");
-    for (const gap of model.businessWorkflowGraph.gaps.slice(0, 6)) {
-      console.log(`- ${gap}`);
-    }
-  }
-  console.log("Browser Plan");
-  console.log(`- login state: ${model.browserPlan.loginState}`);
-  console.log(`- auth contexts: ${model.browserPlan.authContexts.map((context) => `${context.name}${context.role ? `/${context.role}` : ""}`).join(", ") || "none"}`);
-  for (const comparison of model.browserPlan.multiRoleComparisons.slice(0, 4)) {
-    console.log(`- compare ${comparison.left} vs ${comparison.right}: ${comparison.categories.join(", ") || "mapped routes"}`);
-  }
-  console.log("CVE Reconciliation");
-  console.log(`- status: ${model.cveReconciliation.status}`);
-  console.log(`- duplicates: ${model.cveReconciliation.duplicateGroups.length}`);
-  console.log(`- version gaps: ${model.cveReconciliation.versionGaps.length}`);
-  console.log(`- validation ready: ${model.cveReconciliation.validationReady.length}`);
-  console.log("Subagent Operating Model");
-  console.log(`- status: ${model.subAgentModel.status}`);
-  console.log(`- queued:${model.subAgentModel.capacity.queued} running:${model.subAgentModel.capacity.running} completed:${model.subAgentModel.capacity.completed} failed:${model.subAgentModel.capacity.failed}`);
-  for (const role of model.subAgentModel.roleCoverage.filter((item) => item.gap).slice(0, 6)) {
-    console.log(`- gap ${role.role}: ${role.gap}`);
-  }
-}
-
-function printSubAgentCoordinationPlan(agent: MainAgent, sessionId: string): void {
-  const plan = agent.buildSubAgentCoordinationPlan(sessionId);
-  if (plan.items.length === 0) {
-    console.log("No subagent coordination items recommended.");
-    return;
-  }
-  console.log(`Subagent Coordination Plan (${plan.generatedAt})`);
-  for (const item of plan.items) {
-    const blocked = item.blockedReason ? ` | blocked:${item.blockedReason}` : "";
-    console.log(`- ${item.priority} | ${item.role} | ${item.runMode}${blocked} | ${item.title}`);
-    console.log(`  rationale: ${item.rationale}`);
-    if (item.contextHints.length > 0) {
-      console.log(`  context: ${item.contextHints.join("; ")}`);
-    }
-    if (item.expectedOutput.length > 0) {
-      console.log(`  expected output: ${item.expectedOutput.join("; ")}`);
     }
   }
 }
@@ -3060,11 +2349,11 @@ async function runTaskLoop(
   agent: MainAgent,
   sessionId: string,
   initialInput: string,
-  rl: ReturnType<typeof createInterface>,
-  maxTurns = 8
+  rl: ReturnType<typeof createInterface>
 ): Promise<void> {
   let nextInput = initialInput;
-  for (let turnIndex = 0; turnIndex < maxTurns; turnIndex += 1) {
+  // No hard turn limit — the model decides when the task is complete.
+  while (true) {
     const result = await agent.runTurn(sessionId, nextInput);
     printTurnResult(result);
 
@@ -3087,7 +2376,6 @@ async function runTaskLoop(
 
     return;
   }
-  console.log(`Task stopped after ${maxTurns} turns to avoid an uncontrolled loop.`);
 }
 
 function printTurnResult(result: TurnResult): void {

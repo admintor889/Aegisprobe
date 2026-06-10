@@ -60,9 +60,7 @@ import { parseDecisionLegacy as parseDecisionLegacyFromModule } from "./decision
 import { summarizeContextsLocally as summarizeContextsLocallyFromUtils } from "./fallback-utils.js";
 import { extractLocalConstraints as extractLocalConstraintsFromUtils, fallbackIntent as fallbackIntentFromUtils, isSecurityAssessmentIntent as isSecurityAssessmentIntentFromUtils, normalizeIntent as normalizeIntentFromUtils, parseIntentExtraction, sanitizeFilePaths as sanitizeFilePathsFromUtils, sanitizeTargets as sanitizeTargetsFromUtils } from "./intent-utils.js";
 import { prepareApplyPatch, prepareFileEdit } from "./patch-utils.js";
-import { executePentestPipeline as executePentestPipelineFromModule, resumePentestPipeline as resumePentestPipelineFromModule, type PauseState } from "./pentest-runtime.js";
 import { buildExpertWorkbenchContext } from "./expert-workbench-context.js";
-import { requestPentestDecision } from "./pentest-decision.js";
 import { renderPromptPackTemplate } from "./prompt-pack.js";
 import { executeDecisionToolItem as executeDecisionToolItemFromModule, executeSecurityClosureStep as executeSecurityClosureStepFromModule, executeSecurityDecisionItem as executeSecurityDecisionItemFromModule, runAdaptiveSecurityLoop as runAdaptiveSecurityLoopFromModule } from "./security-execution.js";
 import { addSecurityAuthContext as addSecurityAuthContextFromModule, buildAuthorizationBoundaryMatrix as buildAuthorizationBoundaryMatrixFromModule, buildAuthorizationValidationPlan as buildAuthorizationValidationPlanFromModule, buildBusinessLogicTestPlan as buildBusinessLogicTestPlanFromModule, evaluateComparisonAgainstPolicy, executeBusinessLogicRoleComparison as executeBusinessLogicRoleComparisonFromModule, executeBusinessLogicTest as executeBusinessLogicTestFromModule } from "./security-business.js";
@@ -85,6 +83,8 @@ import { runInput as runInputFromModule, runTurn as runTurnFromModule, understan
 import { executeListFilesAction as executeListFilesActionFromModule, executeReadFileAction as executeReadFileActionFromModule } from "./workspace-actions.js";
 import { importApiDescriptionDocument as importApiDescriptionDocumentFromModule, type ApiDescriptionImportResult } from "./api-description-import.js";
 import { buildWebPentestControlPlane as buildWebPentestControlPlaneFromModule, buildWebPentestOperatingPicture as buildWebPentestOperatingPictureFromModule } from "./web-pentest-control-plane.js";
+import { AgentThread } from "./agent-thread.js";
+import { buildAgentThreadTools } from "./agent-thread-tools.js";
 
 export type ApprovalDecision = boolean | {
   approved: boolean;
@@ -247,88 +247,6 @@ export class MainAgent {
     probe: "basic_recon" | "dns" | "http_headers" = "basic_recon"
   ): Promise<string> {
     return await this.executeSecurityProbeAction(sessionId, () => undefined, target, probe, "User requested a controlled security information-gathering probe.");
-  }
-
-  private pentestRuntimeDeps() {
-    return {
-      store: this.options.store,
-      skillRegistry: this.skillRegistry,
-      hasSession: (currentSessionId: string) => this.hasSession(currentSessionId),
-      projectRoot: () => this.projectRoot(),
-      emitLifecycleEvent: (currentSessionId: string, turnId: string, kind: TurnEventKind, message: string, payload?: unknown) =>
-        this.emitLifecycleEvent(currentSessionId, turnId, kind, message, payload),
-      buildContextSnapshot: (currentSessionId: string, overrides?: {
-        currentInput?: string;
-        currentTarget?: TargetInput;
-        fileContexts?: [];
-        turnObservations?: string[];
-        skillContext?: string;
-        securityWorkflowContext?: string;
-      }) => this.buildContextSnapshot(currentSessionId, overrides),
-      samplePentestDecision: async (
-        currentSessionId: string,
-        target: TargetInput,
-        scope: PentestScope,
-        preflight: PipelinePreflightReport,
-        observations: string[],
-        iteration: number,
-        emit: (kind: TurnEventKind, message: string, payload?: unknown) => void,
-        contextSnapshot: ContextSnapshot
-      ) => await this.samplePentestDecision(currentSessionId, target, scope, preflight, observations, iteration, emit, contextSnapshot),
-      executeDecisionTools: async (currentSessionId: string, emit: SubAgentEmitter, actions: AgentAction[], defaultContextPaths: string[]) =>
-        await this.executeDecisionTools(currentSessionId, emit, actions, defaultContextPaths),
-      buildSubAgentDigest: (currentSessionId: string) => this.buildSubAgentDigest(currentSessionId),
-      initGraph: (currentSessionId: string, target: { kind: "url" | "hostname" | "ip"; value: string }) => {
-        this.getOrInitGraph(currentSessionId, target);
-      },
-      getGraph: (currentSessionId: string) => this.getGraph(currentSessionId),
-      renderGraphSummary: (currentSessionId: string) => this.renderGraphSummary(currentSessionId),
-      addGraphEvidence: (
-        currentSessionId: string,
-        params: Parameters<MainAgent["addGraphEvidence"]>[1]
-      ) => this.addGraphEvidence(currentSessionId, params),
-      addGraphHypothesis: (
-        currentSessionId: string,
-        params: Parameters<MainAgent["addGraphHypothesis"]>[1]
-      ) => this.addGraphHypothesis(currentSessionId, params),
-      concludeGraphHypothesis: (currentSessionId: string, hypothesisId: string, evidenceId: string) =>
-        this.concludeGraphHypothesis(currentSessionId, hypothesisId, evidenceId),
-      dispatchSubAgentQueue: async (currentSessionId: string, options: { maxJobs?: number; concurrency?: number; recoverStaleAfterMs?: number }) =>
-        await this.dispatchSubAgentQueue(currentSessionId, options),
-      executeSecurityProbeAction: async (
-        currentSessionId: string,
-        emit: (kind: TurnEventKind, message: string, payload?: unknown) => void,
-        target: string,
-        probe: "basic_recon" | "dns" | "http_headers",
-        purpose: string
-      ) => await this.executeSecurityProbeAction(currentSessionId, emit, target, probe, purpose),
-      recordTechnologyHints: (currentSessionId: string, workflowId: string, target: string, text: string, source: string) =>
-        this.recordTechnologyHints(currentSessionId, workflowId, target, text, source),
-      recordHeaderFindings: (currentSessionId: string, workflowId: string, target: string, summary: string) =>
-        this.recordHeaderFindings(currentSessionId, workflowId, target, summary),
-      buildSecurityDecisionQueueForScope: (currentSessionId: string, target: TargetInput | undefined, scope: PentestScope | undefined) =>
-        this.buildSecurityDecisionQueueForScope(currentSessionId, target, scope),
-      recordLocalCveMatches: (currentSessionId: string, workflowId: string) =>
-        this.recordLocalCveMatches(currentSessionId, workflowId),
-      refreshSecurityCheckStatus: (currentSessionId: string, workflowId: string, activeValidationBlocked: boolean) =>
-        this.refreshSecurityCheckStatus(currentSessionId, workflowId, activeValidationBlocked)
-    };
-  }
-
-  async resumePentestPipeline(
-    sessionId: string,
-    pauseState?: PauseState
-  ): Promise<string> {
-    return await resumePentestPipelineFromModule(this.pentestRuntimeDeps(), sessionId, pauseState);
-  }
-
-  async executePentestPipeline(
-    sessionId: string,
-    targetText: string,
-    options: Partial<PentestScope> = {},
-    pauseState?: PauseState
-  ): Promise<string> {
-    return await executePentestPipelineFromModule(this.pentestRuntimeDeps(), sessionId, targetText, options, pauseState);
   }
 
   listSubAgents(sessionId: string): SubAgentRecord[] {
@@ -1988,33 +1906,6 @@ export class MainAgent {
     );
   }
 
-  private async samplePentestDecision(
-    sessionId: string,
-    target: TargetInput,
-    scope: PentestScope,
-    _preflight: PipelinePreflightReport,
-    observations: string[],
-    iteration: number,
-    emit: (kind: TurnEventKind, message: string, payload?: unknown) => void,
-    contextSnapshot: ContextSnapshot
-  ): Promise<AgentDecision> {
-    return requestPentestDecision({
-      provider: this.options.provider,
-      skillRegistry: this.skillRegistry,
-      hasMcpManager: Boolean(this.options.mcpManager),
-      parseDecision: (text) => this.parseDecision(text),
-      repairDecisionJson: (rawResponse, parseError) => this.repairDecisionJson(rawResponse, parseError)
-    }, {
-      sessionId,
-      target,
-      scope,
-      observations,
-      iteration,
-      emit,
-      contextSnapshot
-    });
-  }
-
   private extractJsonObject(text: string): string {
     return extractJsonObjectFromTools(text);
   }
@@ -2057,178 +1948,50 @@ export class MainAgent {
     options?: {
       signal?: AbortSignal;
       systemPrompt?: string;
-      maxToolRounds?: number;
     }
   ): AsyncGenerator<import("./conversation-loop.js").ConversationTurnEvent> {
-    const { runConversationTurn } = await import("./conversation-loop.js");
-
-    // Build conversation history from store
-    const history = (this.options.store.listConversationMessages?.(sessionId) ?? []).map((m) => ({
-      ...m,
-      role: m.role as "user" | "assistant" | "system" | "tool"
-    }));
-    const messages: import("./conversation-loop.js").ConversationMessage[] = [
-      ...history,
-      {
-        id: newId("msg"),
-        role: "user" as const,
-        content: userInput,
-        createdAt: nowIso()
-      }
-    ];
-
-    // Persist the user message
-    if (this.options.store.insertConversationMessage) {
-      this.options.store.insertConversationMessage({
-        id: messages[messages.length - 1].id,
-        sessionId,
-        role: "user",
-        content: userInput,
-        createdAt: messages[messages.length - 1].createdAt
-      });
-    }
-
-    let accumulatedContent = "";
-    const toolCallsForMessage: Array<{ id: string; name: string; arguments: string }> = [];
-    const assistantMsgId = newId("msg");
-
+    const turnId = newId("turn");
     const emitter = (kind: string, message: string, _payload?: unknown) => {
-      this.options.onEvent?.({ id: newId("evt"), sessionId, turnId: assistantMsgId, kind: kind as any, message, payload: _payload, createdAt: nowIso() });
+      this.options.onEvent?.({
+        id: newId("evt"),
+        sessionId,
+        turnId,
+        kind: kind as TurnEventKind,
+        message,
+        payload: _payload,
+        createdAt: nowIso()
+      });
     };
-
-    for await (const event of runConversationTurn({
-      provider: this.options.provider,
+    const tools = buildAgentThreadTools({
+      sessionId,
       store: this.options.store,
-      mcpManager: this.options.mcpManager,
-      messages,
-      systemPrompt: options?.systemPrompt ?? renderPromptPackTemplate("conversation/interactive-system.md"),
-      signal: options?.signal,
-      maxToolRounds: options?.maxToolRounds,
-      executeShell: async (command, purpose) => {
-        const { executeShellAction } = await import("./shell-orchestration.js");
-        const result = await executeShellAction(
-          this.options.store,
-          this.options.approve,
+      projectRoot: this.projectRoot(),
+      approve: this.options.approve,
+      emit: emitter,
+      executeSecurityProbe: async (target, probe) => {
+        return await this.executeSecurityProbeAction(
           sessionId,
           emitter,
-          command,
-          purpose
-        );
-        return result;
-      },
-      executeReadFile: async (path, purpose) => {
-        const { executeReadFileAction } = await import("./workspace-actions.js");
-        const result = await executeReadFileAction(this.options.store, sessionId, emitter, path, purpose);
-        return result;
-      },
-      executeListFiles: async (path, recursive) => {
-        const { executeListFilesAction } = await import("./workspace-actions.js");
-        const result = await executeListFilesAction(this.options.store, sessionId, emitter, path, "list directory", recursive);
-        return result;
-      },
-      executeSecurityProbe: async (target, probe) => {
-        const { executeSecurityProbeAction } = await import("./security-probes.js");
-        const result = await executeSecurityProbeAction({
-          store: this.options.store,
-          approve: this.options.approve,
-          normalizeApproval: (d) => ({
-            approved: typeof d === "boolean" ? d : d.approved,
-            remembered: typeof d === "boolean" ? false : (d.remember ?? false)
-          }),
-          sessionId,
-          emit: emitter,
           target,
-          probe: probe as any,
-          purpose: "security probe"
-        });
-        return result;
+          probe as SecurityProbe,
+          "agent-requested security probe"
+        );
       },
-      executeFofaSearch: async (query, size) => {
-        const { loadConfig } = await import("@aegisprobe/provider");
-        const config = loadConfig();
-        const { fofaSearch } = await import("@aegisprobe/security");
-        try {
-          const result = await fofaSearch(query, config.fofa, size);
-          if (result.results.length === 0) {
-            return `FOFA search "${query}": No results found. Total: ${result.total}`;
-          }
-          const lines = result.results.map((r, i) =>
-            `${i + 1}. ${r.host}:${r.port} | ${r.title || "(no title)"} | ${r.server || "(unknown server)"} | IP: ${r.ip}`
-          );
-          return `FOFA search "${query}": ${result.total} total results, showing top ${result.results.length}:\n${lines.join("\n")}`;
-        } catch (err) {
-          return `FOFA search error: ${err instanceof Error ? err.message : String(err)}`;
-        }
-      },
-      executeWebFetch: async (url, purpose) => {
-        try {
-          const controller = new AbortController();
-          const timeout = setTimeout(() => controller.abort(), 15_000);
-          const response = await fetch(url, {
-            signal: controller.signal,
-            headers: { "User-Agent": "AegisProbe/1.0 (security-assessment)" }
-          });
-          clearTimeout(timeout);
-          if (!response.ok) {
-            return `Web fetch ${url}: HTTP ${response.status} ${response.statusText}`;
-          }
-          const contentType = response.headers.get("content-type") ?? "";
-          if (!contentType.includes("text/html") && !contentType.includes("text/plain") && !contentType.includes("application/json")) {
-            return `Web fetch ${url}: Content-Type ${contentType}, size ~${response.headers.get("content-length") ?? "unknown"} bytes (non-text, not displayed)`;
-          }
-          const text = await response.text();
-          // Strip HTML tags for readability, limit to 4000 chars
-          const stripped = text.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
-            .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
-            .replace(/<[^>]+>/g, " ")
-            .replace(/&nbsp;/g, " ")
-            .replace(/&amp;/g, "&")
-            .replace(/&lt;/g, "<")
-            .replace(/&gt;/g, ">")
-            .replace(/&#?\w+;/g, " ")
-            .replace(/\s{2,}/g, "\n")
-            .trim()
-            .slice(0, 4000);
-          return `Web fetch ${url} (${response.status}):\n${stripped || "(empty or binary content)"}`;
-        } catch (err) {
-          return `Web fetch error for ${url}: ${err instanceof Error ? err.message : String(err)}`;
-        }
+      reconWebApplication: async (target, reconOptions) => {
+        return await this.reconWebApplication(sessionId, target, reconOptions);
       }
+    });
+    const thread = new AgentThread({
+      provider: this.options.provider,
+      store: this.options.store,
+      sessionId,
+      systemPrompt: options?.systemPrompt ?? renderPromptPackTemplate("conversation/interactive-system.md"),
+      tools
+    });
+    for await (const event of thread.run(userInput, {
+      signal: options?.signal
     })) {
-      // Track tool calls for persistence
-      if (event.kind === "text_delta") {
-        accumulatedContent += event.content;
-      }
-      if (event.kind === "tool_call_end") {
-        toolCallsForMessage.push({ id: event.id, name: event.name, arguments: event.arguments });
-      }
-      if (event.kind === "tool_execution_end") {
-        // Persist tool result
-        if (this.options.store.insertConversationMessage) {
-          this.options.store.insertConversationMessage({
-            id: newId("tool"),
-            sessionId,
-            role: "tool",
-            content: event.result,
-            toolCallId: event.id,
-            createdAt: nowIso()
-          });
-        }
-      }
-
       yield event;
-    }
-
-    // Persist the assistant message
-    if (this.options.store.insertConversationMessage && accumulatedContent.trim()) {
-      this.options.store.insertConversationMessage({
-        id: assistantMsgId,
-        sessionId,
-        role: "assistant",
-        content: accumulatedContent,
-        toolCalls: toolCallsForMessage.length > 0 ? toolCallsForMessage : undefined,
-        createdAt: nowIso()
-      });
     }
   }
 
@@ -2272,3 +2035,11 @@ export {
 } from "./security-probes.js";
 export type { SafeAuthenticatedFetchDetails, SafeReadOnlyMethod, WebPortMatrixProbe, WebPortMatrixEntry } from "./security-probes.js";
 export type { ConversationTurnEvent } from "./conversation-loop.js";
+export { AgentThread } from "./agent-thread.js";
+export type { AgentThreadTool, ConversationMessage } from "./conversation-loop.js";
+export {
+  createAgentToolEnvelope,
+  renderAgentToolEnvelope,
+  type AgentToolEnvelope,
+  type AgentToolStatus
+} from "./agent-tool-envelope.js";

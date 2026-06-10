@@ -171,7 +171,8 @@ export function matchLocalCveKnowledge(
             severity: advisory.severity,
             confidence: "low",
             rationale: `Observed ${technology.name} without a confirmed version. Treat as a candidate only until version evidence is collected.`,
-            source: "local-cve-advisory"
+            source: "local-cve-advisory",
+            relevanceScore: 45
           });
         }
         continue;
@@ -185,7 +186,8 @@ export function matchLocalCveKnowledge(
           severity: advisory.severity,
           confidence: advisory.confidence,
           rationale: `Observed ${technology.name} ${technology.version}; local advisory rule matched ${advisory.rangeLabel}. Validate manually before reporting.`,
-          source: "local-cve-advisory"
+          source: "local-cve-advisory",
+          relevanceScore: 140
         });
       }
     }
@@ -197,7 +199,7 @@ export function matchLocalCveKnowledge(
 export function matchNucleiKnowledgeForTechnologies(
   technologies: Array<Pick<SecurityTechnology, "target" | "name" | "version" | "evidenceSummary">>,
   projectRoot = process.cwd(),
-  maxMatchesPerTechnology = 8
+  maxMatchesPerTechnology = 20
 ): Array<Omit<SecurityCveMatch, "id" | "sessionId" | "workflowId" | "createdAt">> {
   const index = loadSecurityKnowledgeIndex(projectRoot);
   if (!index) {
@@ -212,9 +214,18 @@ export function matchNucleiKnowledgeForTechnologies(
     const candidates = index.templates
       .filter((template) => templateMatchesTechnology(template, technology))
       .filter((template) => templateCompatibleWithObservedVersion(template, technology))
-      .sort((left, right) => severityRank(right.severity) - severityRank(left.severity))
+      .map((template) => ({
+        template,
+        relevance: templateTechnologyRelevance(template, technology)
+      }))
+      .sort((left, right) =>
+        right.relevance - left.relevance
+        || cveYear(right.template) - cveYear(left.template)
+        || severityRank(right.template.severity) - severityRank(left.template.severity)
+        || left.template.id.localeCompare(right.template.id)
+      )
       .slice(0, maxMatchesPerTechnology);
-    for (const template of candidates) {
+    for (const { template, relevance } of candidates) {
       const cveId = template.cveIds[0];
       if (!cveId) {
         continue;
@@ -225,9 +236,12 @@ export function matchNucleiKnowledgeForTechnologies(
         cveId,
         title: template.name,
         severity: template.severity,
-        confidence: technology.version && template.name.includes(technology.version) ? "medium" : "low",
-        rationale: `Local nuclei template index matched observed technology "${technology.name}" to template ${template.id}. Version guard passed for observed version "${technology.version ?? "unknown"}"; treat as candidate until template evidence is validated.`,
-        source: `nuclei-template-index:${template.path}`
+        confidence: technology.version && extractVersions(template.name).includes(cleanVersion(technology.version) ?? "")
+          ? "medium"
+          : "low",
+        rationale: `Local nuclei template index matched observed technology "${technology.name}" to template ${template.id} (relevance ${relevance}). The observed version is "${technology.version ?? "unknown"}"; this remains a candidate unless the template or an authoritative advisory confirms the affected range.`,
+        source: `nuclei-template-index:${template.path}`,
+        relevanceScore: relevance
       });
     }
   }
@@ -289,6 +303,60 @@ function templateMatchesTechnology(
   }
   const evidence = normalizeName(technology.evidenceSummary ?? "");
   return evidence.length >= 5 && (title.includes(evidence) || tags.includes(evidence));
+}
+
+function templateTechnologyRelevance(
+  template: NucleiTemplateKnowledge,
+  technology: Pick<SecurityTechnology, "name" | "version" | "evidenceSummary">
+): number {
+  const techName = normalizeName(technology.name);
+  const product = normalizeName(template.product ?? "");
+  const vendor = normalizeName(template.vendor ?? "");
+  const title = normalizeName(template.name);
+  const tags = template.tags.map(normalizeName);
+  const technologyTokens = meaningfulTokens(`${technology.name} ${technology.evidenceSummary ?? ""}`);
+  const templateTokens = new Set(meaningfulTokens([
+    template.name,
+    template.product ?? "",
+    template.vendor ?? "",
+    ...template.tags
+  ].join(" ")));
+
+  let score = 0;
+  if (product === techName) score += 80;
+  else if (product && (techName.includes(product) || product.includes(techName))) score += 65;
+  if (vendor && technologyTokens.includes(vendor)) score += 8;
+  if (tags.includes(techName)) score += 24;
+  if (title.includes(techName) && techName.length >= 5) score += 18;
+
+  const overlap = technologyTokens.filter((token) => templateTokens.has(token)).length;
+  score += Math.min(30, overlap * 6);
+  if (template.verified) score += 12;
+  if (template.references.length > 0) score += 4;
+  if (template.tags.some((tag) => /^(?:kev|vkev)$/i.test(tag))) score += 4;
+
+  const observedVersion = cleanVersion(technology.version);
+  if (observedVersion && extractVersions(template.name).includes(observedVersion)) {
+    score += 30;
+  }
+  return score;
+}
+
+function meaningfulTokens(value: string): string[] {
+  return [...new Set(
+    value
+      .toLowerCase()
+      .replace(/[^a-z0-9.+_-]+/g, " ")
+      .split(/\s+/)
+      .map((token) => token.trim())
+      .filter((token) => token.length >= 3 && !/^\d+(?:\.\d+)*$/.test(token))
+  )];
+}
+
+function cveYear(template: NucleiTemplateKnowledge): number {
+  const cve = template.cveIds[0] ?? template.id;
+  const year = Number(/\bCVE-(\d{4})-/i.exec(cve)?.[1] ?? 0);
+  return Number.isFinite(year) ? year : 0;
 }
 
 function severityRank(severity: FindingSeverity): number {
@@ -1199,6 +1267,7 @@ export function dedupeCveMatches<T extends Omit<SecurityCveMatch, "id" | "sessio
     byKey.set(key, mergeCveMatch(existing, match));
   }
   return [...byKey.values()].sort((left, right) =>
+    (right.relevanceScore ?? 0) - (left.relevanceScore ?? 0) ||
     severityRank(right.severity) - severityRank(left.severity) ||
     confidenceRank(right.confidence) - confidenceRank(left.confidence) ||
     (left.cveId ?? left.title).localeCompare(right.cveId ?? right.title)
@@ -1216,6 +1285,7 @@ function mergeCveMatch<T extends Omit<SecurityCveMatch, "id" | "sessionId" | "wo
     severity,
     confidence,
     source: sources.join(" + "),
+    relevanceScore: Math.max(left.relevanceScore ?? 0, right.relevanceScore ?? 0),
     rationale
   };
 }

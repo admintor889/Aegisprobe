@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { analyzeJavaScriptAsset, buildAccessExposureMap, buildAdaptiveSecurityActions, buildAuthSurfaceAssessment, buildAuthorizedValidationPlaybook, buildBrowserInteractionPlan, buildBusinessLogicKnowledgeBase, buildBusinessLogicTestPlan, buildBusinessWorkflowGraph, buildCveReconciliationPlan, buildFrameworkKnowledgeIndex, buildFullExploitPrompt, buildJavaScriptBundleAnalysis, buildNucleiKnowledgeIndex, buildOwaspValidationMatrix, buildPayloadCandidateSet, buildPayloadRequestDraftSet, buildPentestPipeline, buildSecurityAssetGraph, buildSecurityClosureModel, buildSecurityDecisionQueue, buildSecurityDecisionSupervision, buildSecurityObjectiveModel, buildSecurityToolCommandForInputFile, buildSecurityValidationChecks, buildSecurityWorkflowPlan, buildSkillExecutionPlan, buildSubAgentCoordinationPlan, buildValidationClosurePlan, classifySecurityToolOutput, createDefaultPentestScope, getSecurityToolInventory, matchExploitTypes, matchLocalCveKnowledge, normalizeApiInventory, normalizeSecurityToolOutput, renderAccessExposureMap, renderPayloadCandidateSet, renderPayloadRequestDraftSet, renderPentestPipelineMarkdown, searchSecurityKnowledge, syncSecurityKnowledge } from "./index.js";
 import { calculateCvss, parseCvssVector, cvssScore, severityFromScore } from "./cvss.js";
+import { CveMatchEngine } from "./cve-chain.js";
 import { parseSemver, parseSemverLenient, compareSemver, parseVersionRange, versionInRange, matchesVersionRange, matchesCpeVersion } from "./semver.js";
 import { parseCpe23, normalizeCpeName, matchCpeAgainstTechnology, batchMatchCpe, templateMatchesTechnologyCpe, cpeMatchConfidence } from "./cpe-matcher.js";
 import { createPenetrationGraph, addEvidence, proposeHypothesis, claimHypothesis, concludeHypothesis, failHypothesis, addOverride, createGraphSnapshot, createGraphCheckpoint, hasGraphChanged, getOpenHypotheses, getUnclaimedHypothesis } from "./graph.js";
@@ -2144,6 +2145,24 @@ describe("security workflow", () => {
 
     expect(matches.some((match) => match.cveId === "CVE-2020-11022")).toBe(true);
     expect(matches.filter((match) => match.cveId === "CVE-2020-11022")).toHaveLength(1);
+  });
+
+  it("uses an explicit knowledge root and ranks evidence-relevant ActiveMQ candidates first", async () => {
+    const projectRoot = join(process.cwd(), "..", "..");
+    const result = await new CveMatchEngine(projectRoot).buildExploitChains([{
+      target: "http://127.0.0.1:8161",
+      name: "Apache ActiveMQ",
+      version: "6.2.2",
+      evidenceSummary: "Apache ActiveMQ 6.2.2 with exposed Jolokia addNetworkConnector operation"
+    }], "http://127.0.0.1:8161");
+
+    expect(result.chains.some((chain) => chain.cveId === "CVE-2026-34197")).toBe(true);
+    expect(result.chains.slice(0, 2).every((chain) => chain.cveId.startsWith("CVE-2026-"))).toBe(true);
+    expect(result.chains.find((chain) => chain.cveId === "CVE-2026-34197")?.exploits)
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({ reference: expect.stringContaining("CVE-2026-34197.yaml") }),
+        expect.objectContaining({ reference: expect.stringContaining("horizon3.ai") })
+      ]));
   });
 
   it("suppresses local nuclei CVE candidates when explicit template versions are older than observed versions", () => {

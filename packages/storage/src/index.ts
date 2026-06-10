@@ -271,6 +271,7 @@ export class AuditStore {
         confidence TEXT NOT NULL,
         rationale TEXT NOT NULL,
         source TEXT NOT NULL,
+        relevance_score INTEGER,
         created_at TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS security_validation_attempts (
@@ -365,6 +366,7 @@ export class AuditStore {
         session_id TEXT NOT NULL,
         role TEXT NOT NULL,
         content TEXT NOT NULL DEFAULT '',
+        reasoning_content TEXT,
         tool_call_id TEXT,
         tool_calls_json TEXT,
         created_at TEXT NOT NULL
@@ -373,6 +375,7 @@ export class AuditStore {
     `);
 
     this.ensureColumn("subagents", "description", "TEXT");
+    this.ensureColumn("conversation_messages", "reasoning_content", "TEXT");
     this.ensureColumn("subagents", "priority", "TEXT");
     this.ensureColumn("subagents", "run_mode", "TEXT");
     this.ensureColumn("subagents", "retry_count", "INTEGER NOT NULL DEFAULT 0");
@@ -385,6 +388,7 @@ export class AuditStore {
     this.ensureColumn("subagents", "last_heartbeat_at", "TEXT");
     this.ensureColumn("subagents", "memory_key", "TEXT");
     this.ensureColumn("security_tool_runs", "output_artifact", "TEXT");
+    this.ensureColumn("cve_matches", "relevance_score", "INTEGER");
     this.ensureColumn("security_tool_runs", "failure_category", "TEXT");
     this.ensureColumn("security_tool_runs", "finding_count", "INTEGER");
     this.ensureColumn("findings", "state", "TEXT");
@@ -449,17 +453,19 @@ export class AuditStore {
     sessionId: string;
     role: string;
     content: string;
+    reasoningContent?: string;
     toolCallId?: string;
     toolCalls?: Array<{ id: string; name: string; arguments: string }>;
     createdAt: string;
   }): void {
     this.db.prepare(
-      "INSERT INTO conversation_messages (id, session_id, role, content, tool_call_id, tool_calls_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+      "INSERT INTO conversation_messages (id, session_id, role, content, reasoning_content, tool_call_id, tool_calls_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
     ).run(
       msg.id,
       msg.sessionId,
       msg.role,
       msg.content,
+      msg.reasoningContent ?? null,
       msg.toolCallId ?? null,
       msg.toolCalls ? JSON.stringify(msg.toolCalls) : null,
       msg.createdAt
@@ -472,22 +478,28 @@ export class AuditStore {
     sessionId: string;
     role: string;
     content: string;
+    reasoningContent?: string;
     toolCallId?: string;
     toolCalls?: Array<{ id: string; name: string; arguments: string }>;
     createdAt: string;
   }> {
     const rows = this.db.prepare(`
-      SELECT id, session_id AS sessionId, role, content, tool_call_id AS toolCallId,
-             tool_calls_json AS toolCallsJson, created_at AS createdAt
-      FROM conversation_messages
-      WHERE session_id = ?
-      ORDER BY created_at ASC
-      LIMIT ?
+      SELECT id, sessionId, role, content, reasoningContent, toolCallId, toolCallsJson, createdAt
+      FROM (
+        SELECT rowid AS sequence, id, session_id AS sessionId, role, content, tool_call_id AS toolCallId,
+               reasoning_content AS reasoningContent, tool_calls_json AS toolCallsJson, created_at AS createdAt
+        FROM conversation_messages
+        WHERE session_id = ?
+        ORDER BY created_at DESC, rowid DESC
+        LIMIT ?
+      )
+      ORDER BY createdAt ASC, sequence ASC
     `).all(sessionId, limit) as Array<{
       id: string;
       sessionId: string;
       role: string;
       content: string;
+      reasoningContent?: string;
       toolCallId?: string;
       toolCallsJson?: string;
       createdAt: string;
@@ -500,6 +512,44 @@ export class AuditStore {
 
   clearConversationMessages(sessionId: string): void {
     this.db.prepare("DELETE FROM conversation_messages WHERE session_id = ?").run(sessionId);
+  }
+
+  replaceConversationMessages(
+    sessionId: string,
+    messages: Array<{
+      id: string;
+      role: string;
+      content: string;
+      reasoningContent?: string;
+      toolCallId?: string;
+      toolCalls?: Array<{ id: string; name: string; arguments: string }>;
+      createdAt: string;
+    }>
+  ): void {
+    const insert = this.db.prepare(
+      "INSERT INTO conversation_messages (id, session_id, role, content, reasoning_content, tool_call_id, tool_calls_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+    );
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.prepare("DELETE FROM conversation_messages WHERE session_id = ?").run(sessionId);
+      for (const message of messages) {
+        insert.run(
+          message.id,
+          sessionId,
+          message.role,
+          message.content,
+          message.reasoningContent ?? null,
+          message.toolCallId ?? null,
+          message.toolCalls ? JSON.stringify(message.toolCalls) : null,
+          message.createdAt
+        );
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    this.touchSession(sessionId);
   }
 
   getRecentMessages(sessionId: string, limit = 12): StoredMessage[] {
@@ -1481,9 +1531,9 @@ export class AuditStore {
     this.db.prepare(`
       INSERT INTO cve_matches (
         id, session_id, workflow_id, target, technology, cve_id, title, severity,
-        confidence, rationale, source, created_at
+        confidence, rationale, source, relevance_score, created_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       match.id,
       match.sessionId,
@@ -1496,6 +1546,7 @@ export class AuditStore {
       match.confidence,
       match.rationale,
       match.source,
+      match.relevanceScore ?? null,
       match.createdAt
     );
     this.touchSession(match.sessionId);
@@ -1505,7 +1556,7 @@ export class AuditStore {
     this.db.prepare(`
       UPDATE cve_matches
       SET workflow_id = ?, target = ?, technology = ?, cve_id = ?, title = ?, severity = ?,
-          confidence = ?, rationale = ?, source = ?
+          confidence = ?, rationale = ?, source = ?, relevance_score = ?
       WHERE id = ?
     `).run(
       match.workflowId ?? null,
@@ -1517,6 +1568,7 @@ export class AuditStore {
       match.confidence,
       match.rationale,
       match.source,
+      match.relevanceScore ?? null,
       match.id
     );
     this.touchSession(match.sessionId);
@@ -1526,6 +1578,7 @@ export class AuditStore {
     return this.db.prepare(`
       SELECT id, session_id AS sessionId, workflow_id AS workflowId, target, technology,
              cve_id AS cveId, title, severity, confidence, rationale, source,
+             relevance_score AS relevanceScore,
              created_at AS createdAt
       FROM cve_matches
       WHERE session_id = ?

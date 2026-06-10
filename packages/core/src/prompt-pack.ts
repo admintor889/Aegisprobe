@@ -65,6 +65,18 @@ export function renderPromptPackTemplate(fileName: string, variables: Record<str
   return rendered;
 }
 
+export function loadPromptPackJson<T>(fileName: string): T {
+  const packDir = resolvePromptPackDir();
+  if (!packDir) {
+    throw new Error(`Prompt pack directory was not found while loading ${fileName}.`);
+  }
+  const filePath = joinPath(packDir, fileName);
+  if (!existsSync(filePath)) {
+    throw new Error(`Prompt pack file is missing: ${fileName}.`);
+  }
+  return JSON.parse(readFileSync(filePath, "utf8")) as T;
+}
+
 function readPromptPackFile(fileName: string, variables: Record<string, string>): string {
   const packDir = resolvePromptPackDir();
   if (!packDir) {

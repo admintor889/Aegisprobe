@@ -2,6 +2,7 @@ import { evaluateCommand } from "@aegisprobe/policy";
 import { newId, nowIso, sanitizeObservationText, truncateForContext, truncateLongLines, type ShellCommandRecord, type TurnEventKind } from "@aegisprobe/shared";
 import { runShell } from "@aegisprobe/shell";
 import type { AuditStore } from "@aegisprobe/storage";
+import { createAgentToolEnvelope, type AgentToolEnvelope } from "./agent-tool-envelope.js";
 
 export type ApprovalDecisionLike = boolean | {
   approved: boolean;
@@ -189,4 +190,125 @@ export async function executeShellAction(
     `Output summary:\n${result.summary || "(no output)"}`,
     result.output && result.output !== result.summary ? `Raw output excerpt:\n${truncateForContext(truncateLongLines(sanitizeObservationText(result.output)), 12_000)}` : undefined
   ].filter(Boolean).join("\n");
+}
+
+export async function executeShellActionEnvelope(
+  store: AuditStore,
+  approve: (subject: string, detail: string) => Promise<ApprovalDecisionLike>,
+  sessionId: string,
+  emit: ShellEventEmitter,
+  command: string,
+  purpose: string
+): Promise<AgentToolEnvelope> {
+  const startedAt = nowIso();
+  const decision = evaluateCommand(command);
+  const record: ShellCommandRecord = {
+    id: newId("cmd"),
+    sessionId,
+    command,
+    risk: decision.risk,
+    status: decision.allowed ? "pending" : "blocked",
+    summary: purpose || decision.reason,
+    exitCode: null,
+    createdAt: startedAt,
+    updatedAt: startedAt
+  };
+  store.addCommand(record);
+
+  if (!decision.allowed) {
+    store.addApproval(sessionId, command, false, decision.reason);
+    emit("tool_blocked", `Blocked shell command: ${command}`, {
+      reason: decision.reason,
+      risk: decision.risk
+    });
+    return createAgentToolEnvelope({
+      tool: "execute_shell",
+      status: "blocked",
+      startedAt,
+      stderr: decision.reason,
+      metadata: { command, purpose, risk: decision.risk }
+    });
+  }
+
+  const alreadyApproved = store.hasApprovedShellCommand(command);
+  if (!alreadyApproved) {
+    emit("tool_approval_requested", `Approval requested for shell command: ${command}`, {
+      command,
+      purpose,
+      risk: decision.risk,
+      reason: decision.reason
+    });
+  }
+  const approval = await resolveShellApproval(
+    store,
+    command,
+    `Execute shell command (${decision.risk})`,
+    `${command}\n\nPurpose: ${purpose}\n${decision.reason}`,
+    approve
+  );
+  store.addApproval(
+    sessionId,
+    command,
+    approval.approved,
+    approval.remembered ? `${decision.reason} Remembered approval.` : decision.reason
+  );
+  emit("tool_approval_resolved", approval.approved ? "Shell command approved." : "Shell command denied.", {
+    command,
+    approved: approval.approved,
+    remembered: approval.remembered
+  });
+
+  if (!approval.approved) {
+    store.updateCommand({ ...record, status: "denied", updatedAt: nowIso() });
+    return createAgentToolEnvelope({
+      tool: "execute_shell",
+      status: "blocked",
+      startedAt,
+      stderr: "User denied command execution.",
+      metadata: { command, purpose, risk: decision.risk }
+    });
+  }
+
+  emit("tool_started", `Running shell command: ${command}`, { command });
+  store.updateCommand({ ...record, status: "approved", updatedAt: nowIso() });
+  const result = await runShell(command, process.cwd(), shellTimeoutMs(command));
+  const status = result.exitCode === null
+    ? "timeout"
+    : result.exitCode === 0
+      ? "success"
+      : "error";
+  store.updateCommand({
+    ...record,
+    status: status === "success" ? "success" : "failed",
+    summary: result.summary,
+    exitCode: result.exitCode,
+    updatedAt: nowIso()
+  });
+  store.addObservation({
+    id: newId("obs"),
+    sessionId,
+    source: command,
+    summary: result.summary || "(no output)",
+    createdAt: nowIso()
+  });
+  emit("tool_completed", `Shell command completed with exit code ${result.exitCode ?? "timeout"}.`, {
+    command,
+    exitCode: result.exitCode,
+    summary: result.summary
+  });
+
+  return createAgentToolEnvelope({
+    tool: "execute_shell",
+    status,
+    startedAt,
+    exitCode: result.exitCode,
+    stdout: result.stdout,
+    stderr: result.stderr,
+    metadata: {
+      command,
+      purpose,
+      cwd: process.cwd(),
+      risk: decision.risk
+    }
+  });
 }

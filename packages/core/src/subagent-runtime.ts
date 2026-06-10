@@ -8,7 +8,6 @@ import type { AuditStore } from "@aegisprobe/storage";
 import { parseSubAgentToolDecision as parseSubAgentToolDecisionFromTools, type SubAgentToolDecision } from "@aegisprobe/tools";
 import type { SubAgentRoleDefinition } from "./subagent-roles.js";
 import { subAgentRoleDefinitions } from "./subagent-roles.js";
-import { formatToolResult, renderToolResult } from "./tool-result.js";
 import { isWindowsShell } from "@aegisprobe/shell";
 import { renderPromptPackTemplate } from "./prompt-pack.js";
 
@@ -433,10 +432,10 @@ export class SubAgentRuntime {
             observation = await this.deps.executors.listFiles(sessionId, action.path, action.purpose, Boolean(action.recursive));
           } else if (action.type === "shell" && "command" in action) {
             const raw = await this.deps.executors.shell(sessionId, emit ?? (() => undefined), action.command, action.purpose);
-            observation = renderToolResult(formatToolResult("shell", action.command, raw));
+            observation = raw;
           } else if (action.type === "security_probe" && "target" in action && "probe" in action) {
             const raw = await this.deps.executors.securityProbe(sessionId, emit ?? (() => undefined), action.target, action.probe, action.purpose);
-            observation = renderToolResult(formatToolResult("security_probe", `${action.probe} ${action.target}`, raw));
+            observation = raw;
           } else if (action.type === "mcp" && "tool" in action && "args" in action) {
             if (!this.deps.mcpManager) {
               observation = JSON.stringify({ tool: "mcp", action: action.tool, status: "error", hint: "MCP not configured." });
@@ -446,7 +445,7 @@ export class SubAgentRuntime {
                 30_000,
                 `MCP ${action.tool} timed out after 30000ms.`
               );
-              observation = renderToolResult(formatToolResult("mcp", action.tool, mcpResult));
+              observation = mcpResult;
             }
           } else {
             observation = await this.deps.executors.applyPatch(sessionId, emit ?? (() => undefined), action.patch ?? "", action.purpose);

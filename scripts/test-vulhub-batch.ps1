@@ -5,7 +5,6 @@ param(
   [int]$MaxTargets = 0,
   [int]$ComposeUpTimeoutSeconds = 180,
   [int]$HttpReadyTimeoutSeconds = 45,
-  [int]$MaxTurns = 4,
   [int]$AgentTimeoutSeconds = 180,
   [string]$SmokeCases = "scripts\agent-lab-smoke-cases.json",
   [switch]$PreferDockerRun,
@@ -199,6 +198,90 @@ function Get-MissingLocalImages([string]$ComposeDir) {
     }
   }
   return $missing
+}
+
+function Get-DockerContainerSnapshot() {
+  $items = @{}
+  $ok = $false
+  $oldErrorActionPreference = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = "Continue"
+    $raw = & docker ps -a --no-trunc --format "{{.ID}}`t{{.Names}}`t{{.Image}}" 2>$null
+    $ok = $LASTEXITCODE -eq 0
+  } catch {
+    $ok = $false
+    $raw = @()
+  } finally {
+    $ErrorActionPreference = $oldErrorActionPreference
+  }
+  if ($ok) {
+    foreach ($line in @($raw)) {
+      if (-not $line.Trim()) { continue }
+      $parts = $line -split "`t", 3
+      $id = $parts[0].Trim()
+      if ($id) { $items[$id] = $line.Trim() }
+    }
+  }
+  return [pscustomobject]@{ Ok = $ok; Items = $items }
+}
+
+function Get-DockerImageSnapshot() {
+  $items = @{}
+  $ok = $false
+  $oldErrorActionPreference = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = "Continue"
+    $raw = & docker images --no-trunc --format "{{.ID}}`t{{.Repository}}:{{.Tag}}" 2>$null
+    $ok = $LASTEXITCODE -eq 0
+  } catch {
+    $ok = $false
+    $raw = @()
+  } finally {
+    $ErrorActionPreference = $oldErrorActionPreference
+  }
+  if ($ok) {
+    foreach ($line in @($raw)) {
+      if (-not $line.Trim()) { continue }
+      $parts = $line -split "`t", 2
+      $id = $parts[0].Trim()
+      if ($id) { $items[$id] = $line.Trim() }
+    }
+  }
+  return [pscustomobject]@{ Ok = $ok; Items = $items }
+}
+
+function Remove-NewDockerContainers($BeforeSnapshot, [string]$WorkDir, [string]$LogFile) {
+  if (-not $BeforeSnapshot -or -not $BeforeSnapshot.Ok) {
+    Add-Content -LiteralPath $LogFile -Value "SNAPSHOT CLEANUP SKIPPED: initial container snapshot failed"
+    return
+  }
+  $afterSnapshot = Get-DockerContainerSnapshot
+  if (-not $afterSnapshot.Ok) {
+    Add-Content -LiteralPath $LogFile -Value "SNAPSHOT CLEANUP SKIPPED: final container snapshot failed"
+    return
+  }
+  foreach ($id in @($afterSnapshot.Items.Keys)) {
+    if ($BeforeSnapshot.Items.ContainsKey($id)) { continue }
+    Add-Content -LiteralPath $LogFile -Value "SNAPSHOT CLEANUP CONTAINER: $($afterSnapshot.Items[$id])"
+    Run-LoggedCommand -File "docker" -CommandArgs @("rm", "-f", $id) -WorkDir $WorkDir -LogFile $LogFile -TimeoutSeconds 60 | Out-Null
+  }
+}
+
+function Remove-NewDockerImages($BeforeSnapshot, [string]$WorkDir, [string]$LogFile) {
+  if (-not $BeforeSnapshot -or -not $BeforeSnapshot.Ok) {
+    Add-Content -LiteralPath $LogFile -Value "SNAPSHOT CLEANUP SKIPPED: initial image snapshot failed"
+    return
+  }
+  $afterSnapshot = Get-DockerImageSnapshot
+  if (-not $afterSnapshot.Ok) {
+    Add-Content -LiteralPath $LogFile -Value "SNAPSHOT CLEANUP SKIPPED: final image snapshot failed"
+    return
+  }
+  foreach ($id in @($afterSnapshot.Items.Keys)) {
+    if ($BeforeSnapshot.Items.ContainsKey($id)) { continue }
+    Add-Content -LiteralPath $LogFile -Value "SNAPSHOT CLEANUP IMAGE: $($afterSnapshot.Items[$id])"
+    Run-LoggedCommand -File "docker" -CommandArgs @("rmi", "-f", $id) -WorkDir $WorkDir -LogFile $LogFile -TimeoutSeconds 180 | Out-Null
+  }
 }
 
 function Get-ServiceEnvironmentArgs($Service) {
@@ -603,6 +686,8 @@ for ($offset = 0; $offset -lt $total; $offset += $BatchSize) {
     }
 
     $dockerRunState = $null
+    $containerSnapshot = Get-DockerContainerSnapshot
+    $imageSnapshot = if ($RemoveImages) { Get-DockerImageSnapshot } else { $null }
     try {
       Write-Host "[$relativeName] up"
       if ($RequireLocalImages) {
@@ -717,7 +802,7 @@ for ($offset = 0; $offset -lt $total; $offset += $BatchSize) {
         $record.status = if ($exitCode -eq 0) { "agent_smoke_passed" } elseif ($exitCode -eq 124) { "agent_smoke_timeout" } else { "agent_smoke_failed" }
       } else {
         Write-Host "[$relativeName] agent $($record.httpTarget)"
-        $agentArgs = @("apps\cli\dist\index.js", "pentest", $record.httpTarget, "--active", "--yes", "--max-turns", "$MaxTurns", "--rate", "5")
+        $agentArgs = @("apps\cli\dist\index.js", "pentest", $record.httpTarget, "--active", "--yes", "--rate", "5")
         $exitCode = Run-LoggedCommand -File "node" -CommandArgs $agentArgs -WorkDir $repoRoot -LogFile $agentLog -TimeoutSeconds $AgentTimeoutSeconds
         $record.agentExitCode = $exitCode
         $record.status = if ($exitCode -eq 0) { "agent_completed" } elseif ($exitCode -eq 124) { "agent_timeout" } else { "agent_failed" }
@@ -748,6 +833,10 @@ for ($offset = 0; $offset -lt $total; $offset += $BatchSize) {
           $downArgs += @("--rmi", "all")
         }
         Run-LoggedCommand -File "docker" -CommandArgs $downArgs -WorkDir $composeDir -LogFile $targetLog -TimeoutSeconds 180 | Out-Null
+      }
+      Remove-NewDockerContainers $containerSnapshot $composeDir $targetLog
+      if ($RemoveImages) {
+        Remove-NewDockerImages $imageSnapshot $composeDir $targetLog
       }
     }
   }
