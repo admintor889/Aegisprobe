@@ -31,33 +31,164 @@ function warn(value: string): string { return style(value, "yellow"); }
 function brand(value: string): string { return style(value, "green"); }
 function blue(value: string): string { return style(value, "blue"); }
 
+// ── Stateful Markdown → Terminal renderer ──
+// Processes lines one at a time, tracking code-fence state so
+// fenced code blocks get a dim background + indentation instead
+// of being stripped. This mirrors how Codex renders code blocks
+// in the terminal: colored background, indented content, optional
+// language tag.
+
+const CODE_BG = "\x1b[48;5;236m\x1b[38;5;250m";
+const CODE_BORDER = "\x1b[48;5;238m\x1b[38;5;245m";
+const RESET = "\x1b[0m";
+
+function takeDisplayPrefix(value: string, width: number): string {
+  let used = 0;
+  let output = "";
+  for (const character of value) {
+    const characterWidth = terminalCharacterWidth(character);
+    if (used + characterWidth > width) break;
+    output += character;
+    used += characterWidth;
+  }
+  return output;
+}
+
+function displayWidth(value: string): number {
+  let width = 0;
+  for (const character of value) width += terminalCharacterWidth(character);
+  return width;
+}
+
+function terminalCharacterWidth(character: string): number {
+  const codePoint = character.codePointAt(0) ?? 0;
+  if (codePoint === 0 || codePoint < 32 || (codePoint >= 0x7f && codePoint < 0xa0)) return 0;
+  if (
+    (codePoint >= 0x300 && codePoint <= 0x36f)
+    || (codePoint >= 0x1ab0 && codePoint <= 0x1aff)
+    || (codePoint >= 0x1dc0 && codePoint <= 0x1dff)
+    || (codePoint >= 0xfe20 && codePoint <= 0xfe2f)
+  ) {
+    return 0;
+  }
+  if (
+    codePoint >= 0x1100
+    && (
+      codePoint <= 0x115f
+      || codePoint === 0x2329
+      || codePoint === 0x232a
+      || (codePoint >= 0x2e80 && codePoint <= 0xa4cf && codePoint !== 0x303f)
+      || (codePoint >= 0xac00 && codePoint <= 0xd7a3)
+      || (codePoint >= 0xf900 && codePoint <= 0xfaff)
+      || (codePoint >= 0xfe10 && codePoint <= 0xfe19)
+      || (codePoint >= 0xfe30 && codePoint <= 0xfe6f)
+      || (codePoint >= 0xff00 && codePoint <= 0xff60)
+      || (codePoint >= 0xffe0 && codePoint <= 0xffe6)
+      || (codePoint >= 0x1f300 && codePoint <= 0x1faff)
+      || (codePoint >= 0x20000 && codePoint <= 0x3fffd)
+    )
+  ) {
+    return 2;
+  }
+  return 1;
+}
+
+class MarkdownTerminalRenderer {
+  private inCodeBlock = false;
+  private codeLanguage = "";
+  private codeLines: string[] = [];
+  private readonly width: number;
+
+  constructor(width: number) {
+    this.width = width;
+  }
+
+  /** Reset state (call when output resets, e.g. new turn). */
+  reset(): void {
+    this.flushCodeBlock();
+  }
+
+  /**
+   * Process one line of markdown text. Returns zero or more rendered
+   * terminal lines. Code blocks are buffered and emitted as styled
+   * blocks when the fence closes.
+   */
+  processLine(line: string): string[] {
+    if (this.inCodeBlock) {
+      if (/^```\s*$/.test(line.trim())) {
+        return this.flushCodeBlock();
+      }
+      this.codeLines.push(line);
+      return [];
+    }
+
+    const fenceMatch = line.match(/^```(\w+)?\s*$/);
+    if (fenceMatch) {
+      this.inCodeBlock = true;
+      this.codeLanguage = fenceMatch[1] ?? "";
+      this.codeLines = [];
+      return [];
+    }
+
+    return [renderMarkdownLine(line)];
+  }
+
+  /** Flush any open code block at end of output. */
+  flushCodeBlock(): string[] {
+    if (!this.inCodeBlock) return [];
+    this.inCodeBlock = false;
+    const result = this.renderCodeBlock(this.codeLanguage, this.codeLines);
+    this.codeLanguage = "";
+    this.codeLines = [];
+    return result;
+  }
+
+  private renderCodeBlock(language: string, lines: string[]): string[] {
+    if (lines.length === 0) return [];
+    const innerWidth = Math.max(20, this.width - 4);
+    const output: string[] = [];
+    // top border with language tag
+    const langTag = language ? ` ${language} ` : "";
+    const topLeft = `${CODE_BORDER} ${faint(langTag)}${"─".repeat(Math.max(0, innerWidth - langTag.length - 2))}${RESET}`;
+    output.push(topLeft);
+    // code lines with background
+    for (const codeLine of lines) {
+      const clipped = takeDisplayPrefix(codeLine, innerWidth);
+      output.push(`${CODE_BG} ${faint(clipped)}${" ".repeat(Math.max(0, innerWidth - displayWidth(clipped) - 1))}${RESET}`);
+    }
+    // bottom border
+    const bottom = `${CODE_BORDER}${"─".repeat(innerWidth + 1)}${RESET}`;
+    output.push(bottom);
+    return output;
+  }
+}
+
 /**
- * Convert common Markdown formatting to plain terminal text.
- * This is a fallback — the system prompt tells the model to output
- * plain text, but some providers ignore that instruction.
- * Codex avoids this problem entirely by training the model to output
- * terminal-safe text when mode=terminal; we can't retrain, so we strip.
+ * Render a single non-code-fence markdown line to terminal text.
  */
-function stripMarkdownForTerminal(text: string): string {
-  return text
+function renderMarkdownLine(line: string): string {
+  return line
     // Headers: # Title → Title (bold)
-    .replace(/^#{1,6}\s+(.+)$/gm, (_, h) => bold(h))
+    .replace(/^(#{1,6})\s+(.+)$/, (_, _hashes, h) => bold(h))
     // Bold: **text** → text (bold)
     .replace(/\*\*(.+?)\*\*/g, (_, b) => bold(b))
     // Italic: *text* → text
     .replace(/(?<!\*)\*([^*\n]+?)\*(?!\*)/g, "$1")
-    // Inline code: `text` → text
-    .replace(/`([^`\n]+?)`/g, "$1")
-    // Links: [text](url) → text (url)
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, "$1 ($2)")
+    // Inline code: `text` → dim text
+    .replace(/`([^`\n]+?)`/g, (_, c) => faint(c))
+    // Links: [text](url) → text
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, "$1")
     // Bullet list markers: - or * at line start → —
     .replace(/^[*-]\s+(?!\s)/gm, "\u2014 ")
-    // Triple-backtick code fences (open/close) → empty
-    .replace(/^```[\w]*\s*$/gm, "")
     // Blockquote: > text → │ text
-    .replace(/^>\s?(.+)$/gm, "\u2502 $1")
+    .replace(/^>\s?(.+)$/, "\u2502 $1")
     // Horizontal rules: --- or *** → empty line
-    .replace(/^[-*_]{3,}\s*$/gm, "");
+    .replace(/^[-*_]{3,}\s*$/, "");
+}
+
+// Legacy alias for compatibility
+function stripMarkdownForTerminal(text: string): string {
+  return renderMarkdownLine(text);
 }
 
 type CardTone = "info" | "success" | "warning" | "danger" | "tool" | "agent";
@@ -178,11 +309,14 @@ export class CodexLikeTurnRenderer {
   private textOpen = false;
   private pendingText = "";
   private readonly toolArgs = new Map<string, { name: string; args: string }>();
+  private readonly md: MarkdownTerminalRenderer;
 
   constructor(
     private readonly terminal?: PersistentChatTerminal,
     private readonly tools = new ToolTranscriptStore()
-  ) {}
+  ) {
+    this.md = new MarkdownTerminalRenderer(terminalWidth());
+  }
 
   handle(event: ConversationTurnEvent): void {
     switch (event.kind) {
@@ -252,6 +386,7 @@ export class CodexLikeTurnRenderer {
     if (this.textOpen) return;
     this.textOpen = true;
     this.pendingText = "";
+    this.md.reset();
     this.writeLine("");
     this.writeLine(`${brand("\u25cf")} ${bold("AegisProbe")}`);
   }
@@ -263,24 +398,42 @@ export class CodexLikeTurnRenderer {
       return;
     }
     this.pendingText += content;
-    const newline = this.pendingText.lastIndexOf("\n");
-    if (newline >= 0) {
-      const complete = this.pendingText.slice(0, newline + 1);
-      this.pendingText = this.pendingText.slice(newline + 1);
-      this.terminal.writeLine(stripMarkdownForTerminal(complete));
+    // Split on newlines and feed complete lines through the markdown renderer.
+    // The renderer is stateful — it buffers code-fence blocks and emits them
+    // as styled terminal blocks when the fence closes.
+    while (true) {
+      const nl = this.pendingText.indexOf("\n");
+      if (nl < 0) break;
+      const completeLine = this.pendingText.slice(0, nl);
+      this.pendingText = this.pendingText.slice(nl + 1);
+      for (const rendered of this.md.processLine(completeLine)) {
+        this.terminal.writeLine(rendered);
+      }
     }
-    this.terminal.setLiveText(stripMarkdownForTerminal(this.pendingText));
+    // Live text: show the partial line (still in progress).
+    for (const rendered of this.md.processLine(this.pendingText)) {
+      this.terminal.writeLine(rendered);
+      this.pendingText = "";
+    }
+    this.terminal.setLiveText(renderMarkdownLine(this.pendingText));
   }
 
   private endAssistantText(): void {
     if (!this.textOpen) return;
+    // Flush any remaining buffered code block.
+    for (const rendered of this.md.processLine(this.pendingText)) {
+      if (this.terminal) this.terminal.writeLine(rendered);
+    }
+    for (const rendered of this.md.flushCodeBlock()) {
+      if (this.terminal) this.terminal.writeLine(rendered);
+    }
+    this.pendingText = "";
     if (this.terminal) {
-      this.terminal.setLiveText(stripMarkdownForTerminal(this.pendingText));
+      this.terminal.setLiveText("");
       this.terminal.commitLiveText();
     } else {
       process.stdout.write("\n");
     }
-    this.pendingText = "";
     this.textOpen = false;
   }
 
