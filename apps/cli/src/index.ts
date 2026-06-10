@@ -17,7 +17,8 @@ import { extractUrlLikeTargets, parseTargetInput, type IntentExtraction, type Se
 import { EmptySkillRegistry, FileSkillRegistry } from "@aegisprobe/skills";
 import { buildAccessExposureMap, buildPayloadCandidateSet, buildPayloadRequestDraftSet, buildSkillExecutionPlan, checkSecurityToolHealth, getSecurityToolInventory, loadBusinessLogicKnowledge, loadFrameworkKnowledgeIndex, loadSecurityKnowledgeIndex, renderAccessExposureMap, renderPayloadCandidateSet, renderPayloadRequestDraftSet, searchSecurityKnowledge, syncSecurityKnowledge } from "@aegisprobe/security";
 import type { AuditStore } from "@aegisprobe/storage";
-import { aegisPrompt, printAegisEvent, printChatBanner } from "./terminal-ui.js";
+import { PersistentChatTerminal } from "./chat-terminal.js";
+import { CodexLikeTurnRenderer, ToolTranscriptStore, printAegisEvent, printChatBanner } from "./terminal-ui.js";
 
 type CliOptions = {
   config?: string;
@@ -125,9 +126,11 @@ async function main(): Promise<void> {
 
   program.command("chat")
     .description("Start an interactive terminal agent session")
-    .action(async () => {
+    .option("--yes", "auto-approve all shell commands and tool actions (use only on isolated lab targets)")
+    .option("--resume <session-id>", "resume an existing session")
+    .action(async (commandOptions: { yes?: boolean; resume?: string }) => {
       const options = program.opts<CliOptions>();
-      await startChat(options);
+      await startChat(options, commandOptions.resume, Boolean(commandOptions.yes));
     });
 
   program.command("run")
@@ -598,14 +601,20 @@ async function main(): Promise<void> {
     .option("--webui-url <url>", "custom Web UI URL for event bridging", "http://127.0.0.1:3200")
     .action(async (target: string, commandOptions: { active?: boolean; deep?: boolean; allowCidr?: boolean; rate: string; browser?: boolean; yes?: boolean; resume?: boolean; webui?: boolean; webuiUrl?: string }) => {
       const options = program.opts<CliOptions>();
-      const rl = createInterface({ input, output });
+      const fallbackRl = input.isTTY && output.isTTY ? undefined : createInterface({ input, output });
+      const terminal = new PersistentChatTerminal({
+        input,
+        output,
+        fallbackReadLine: async (prompt) => fallbackRl ? askLine(fallbackRl, prompt) : ""
+      });
+      const toolTranscript = new ToolTranscriptStore();
       const webuiUrl = commandOptions.webui ? (commandOptions.webuiUrl ?? "http://127.0.0.1:3200") : null;
       try {
         const autoApprove = { active: false };
 
-        // Compose onEvent: print to console + bridge to Web UI
+        // Keep the interactive transcript compact while still forwarding the full event stream.
         const composedOnEvent = (event: TurnEvent) => {
-          printRealtimeEvent(event);
+          if (!terminal.isInteractive) printRealtimeEvent(event);
           if (webuiUrl) {
             // Fire-and-forget POST to Web UI
             fetch(`${webuiUrl}/api/events`, {
@@ -616,14 +625,18 @@ async function main(): Promise<void> {
           }
         };
 
-        const agent = await createAgent(options.config, rl, composedOnEvent, autoApprove, { enableMcp: Boolean(commandOptions.browser) });
+        const agent = await createAgent(options.config, undefined, composedOnEvent, autoApprove, {
+          enableMcp: Boolean(commandOptions.browser),
+          promptForInput: (prompt) => terminal.requestLine(prompt, "approve"),
+          onStatus: (message) => terminal.writeLine(message)
+        });
 
         if (commandOptions.resume) {
           const sessionId = target; // target is actually session-id in resume mode
           if (!agent.hasSession(sessionId)) throw new Error(`Session not found: ${sessionId}`);
           console.log(`Resuming security session ${sessionId}...`);
           if (webuiUrl) console.log(`Bridging events to Web UI at ${webuiUrl}\n`);
-          await chatLoop(agent, sessionId, rl, projectRootFromConfig(options.config), autoApprove);
+          await chatLoop(agent, sessionId, terminal, toolTranscript, projectRootFromConfig(options.config), autoApprove);
           console.log(`Session saved: ${sessionId}`);
           return;
         }
@@ -631,7 +644,10 @@ async function main(): Promise<void> {
         const intent = buildDirectTargetIntent(target, "authorized_security_assessment");
         printIntent(intent);
         if (!commandOptions.yes) {
-          const authorized = await confirmAuthorization(rl, intent);
+          const authorized = await confirmAuthorization(
+            (prompt) => terminal.requestLine(prompt, "authorize"),
+            intent
+          );
           if (!authorized) {
             console.log("Authorization not confirmed. No session created.");
             return;
@@ -640,14 +656,15 @@ async function main(): Promise<void> {
         const sessionId = agent.createSession(`pentest: ${target}`);
         if (webuiUrl) console.log(`Bridging events to Web UI at ${webuiUrl}\n`);
         autoApprove.active = Boolean(commandOptions.yes);
-        const turnResult = await runChatTurn(agent, sessionId, target, rl);
+        const turnResult = await runChatTurn(agent, sessionId, target, terminal, toolTranscript);
         if (!turnResult.ok) {
           process.exitCode = 1;
         }
         autoApprove.active = false;
         console.log(`Session saved: ${sessionId}`);
       } finally {
-        rl.close();
+        terminal.close();
+        fallbackRl?.close();
         await stopMcpManagerForCleanup();
       }
     });
@@ -1272,7 +1289,11 @@ async function createAgent(
   rl?: ReturnType<typeof createInterface>,
   onEvent?: (event: TurnEvent) => void,
   autoApprove?: { active: boolean },
-  runtimeOptions: { enableMcp?: boolean } = {}
+  runtimeOptions: {
+    enableMcp?: boolean;
+    promptForInput?: (prompt: string) => Promise<string>;
+    onStatus?: (message: string) => void;
+  } = {}
 ): Promise<MainAgent> {
   const resolvedConfigPath = resolveCliConfigPath(configPath);
   const config = loadConfig(resolvedConfigPath);
@@ -1296,8 +1317,11 @@ async function createAgent(
       await mcpManager.waitAllReady(30_000);
       const names = mcpManager.listClients().map(c => c.serverName).join(', ');
       const count = mcpManager.listClients().reduce((sum,c)=>sum+c.getTools().length,0);
-      if (count > 0) console.log(`MCP ready: ${names} (${count} tools)`);
-      else console.log(`MCP: ${names} not ready (tools will appear when server starts)`);
+      const status = count > 0
+        ? `MCP ready: ${names} (${count} tools)`
+        : `MCP: ${names} not ready (tools will appear when server starts)`;
+      if (runtimeOptions.onStatus) runtimeOptions.onStatus(status);
+      else console.log(status);
     }).catch(() => {});
   }
   return new MainAgent({
@@ -1313,7 +1337,11 @@ async function createAgent(
         return { approved: true };
       }
       const prompt = `${subject}\n${detail}\nApprove? Type YES once, ALWAYS to remember this exact command, anything else to deny: `;
-      const answer = rl ? await askLine(rl, prompt) : "";
+      const answer = runtimeOptions.promptForInput
+        ? await runtimeOptions.promptForInput(prompt)
+        : rl
+          ? await askLine(rl, prompt)
+          : "";
       const normalized = answer.trim().toUpperCase();
       return {
         approved: normalized === "YES" || normalized === "ALWAYS",
@@ -1327,7 +1355,10 @@ async function createQueryAgent(configPath?: string): Promise<MainAgent> {
   return await createAgent(configPath, undefined, undefined, undefined, { enableMcp: false });
 }
 
-async function confirmAuthorization(rl: ReturnType<typeof createInterface>, intent: IntentExtraction): Promise<boolean> {
+async function confirmAuthorization(
+  readLine: (prompt: string) => Promise<string>,
+  intent: IntentExtraction
+): Promise<boolean> {
   if (intent.intent === "conversation" && intent.targets.length === 0 && intent.filePaths.length === 0) {
     return true;
   }
@@ -1336,7 +1367,7 @@ async function confirmAuthorization(rl: ReturnType<typeof createInterface>, inte
     : intent.filePaths.length > 0
       ? `file:${intent.filePaths.join(", ")}`
       : "no concrete URL/domain/file extracted";
-  const answer = await askLine(rl, `Confirm you are authorized to work on this scope (${summary}). Type YES to continue: `);
+  const answer = await readLine(`Confirm you are authorized to work on this scope (${summary}). Type YES to continue: `);
   return answer.trim().toUpperCase() === "YES";
 }
 
@@ -1387,45 +1418,58 @@ async function runOnce(target: string, options: CliOptions): Promise<void> {
   }
 }
 
-async function startChat(options: CliOptions, resumeSessionId?: string): Promise<void> {
-  const rl = createInterface({ input, output });
+async function startChat(options: CliOptions, resumeSessionId?: string, autoApproveHint = false): Promise<void> {
+  const fallbackRl = input.isTTY && output.isTTY ? undefined : createInterface({ input, output });
+  const terminal = new PersistentChatTerminal({
+    input,
+    output,
+    fallbackReadLine: async (prompt) => fallbackRl ? askLine(fallbackRl, prompt) : ""
+  });
+  const toolTranscript = new ToolTranscriptStore();
   try {
     const projectRoot = projectRootFromConfig(options.config);
-    const autoApprove = { active: false };
-    const agent = await createAgent(options.config, rl, printRealtimeEvent, autoApprove);
+    const autoApprove = { active: autoApproveHint };
+    const agent = await createAgent(options.config, undefined, undefined, autoApprove, {
+      promptForInput: (prompt) => terminal.requestLine(prompt, "approve"),
+      onStatus: (message) => terminal.writeLine(message)
+    });
 
     if (resumeSessionId) {
       printChatBanner({ mode: "resume", sessionId: resumeSessionId });
       if (!agent.hasSession(resumeSessionId)) {
         throw new Error(`Session not found: ${resumeSessionId}`);
       }
-  console.log(`AegisProbe resumed session ${resumeSessionId}. Type /help for commands or continue the conversation directly.`);
-      await chatLoop(agent, resumeSessionId, rl, projectRoot, autoApprove);
+      terminal.writeLine(`AegisProbe resumed session ${resumeSessionId}. Type /help for commands or continue the conversation directly.`);
+      await chatLoop(agent, resumeSessionId, terminal, toolTranscript, projectRoot, autoApprove);
       console.log(`Session saved: ${resumeSessionId}`);
       return;
     }
 
-  console.log("AegisProbe chat. Type /help for commands, /exit to quit. Just chat naturally — the agent can read files, run shell commands, and perform security probes. Press Escape to interrupt a running response.");
+    console.log("AegisProbe chat. Type /help for commands, /exit to quit. The input panel remains available while the agent works.");
     printChatBanner({ mode: "chat" });
-    const first = await askLine(rl, "Describe the task, URL/domain, file path, or just chat: ");
+    const first = await terminal.readLine("task");
     if (!first.trim() || first.trim() === "/exit") {
       return;
     }
 
     const intent = await agent.understandUserInput(first);
     printIntent(intent);
-    const authorized = await confirmAuthorization(rl, intent);
+    const authorized = await confirmAuthorization(
+      (prompt) => terminal.requestLine(prompt, "authorize"),
+      intent
+    );
     if (!authorized) {
       console.log("Authorization not confirmed. No session created.");
       return;
     }
 
     const sessionId = agent.createSession(`chat: ${first.slice(0, 80)}`);
-    await runChatTurn(agent, sessionId, first, rl);
-    await chatLoop(agent, sessionId, rl, projectRoot, autoApprove);
+    await runChatTurn(agent, sessionId, first, terminal, toolTranscript);
+    await chatLoop(agent, sessionId, terminal, toolTranscript, projectRoot, autoApprove);
     console.log(`Session saved: ${sessionId}`);
   } finally {
-    rl.close();
+    terminal.close();
+    fallbackRl?.close();
   }
 }
 
@@ -1484,64 +1528,33 @@ async function runChatTurn(
   agent: MainAgent,
   sessionId: string,
   userInput: string,
-  rl: ReturnType<typeof createInterface>
+  terminal: PersistentChatTerminal,
+  toolTranscript: ToolTranscriptStore
 ): Promise<{ ok: boolean }> {
-  // Set up interrupt for this turn
-  const interrupt = createInterruptController(rl);
+  const controller = new AbortController();
+  const renderer = new CodexLikeTurnRenderer(terminal, toolTranscript);
   let completed = false;
   let failed = false;
 
+  // Echo user input immediately, before any blocking work.
+  terminal.writeUserLine(`\u2502 ${userInput}`);
+  terminal.setBusy(controller);
+  terminal.setStatus("thinking…");
   try {
-    await withInterrupt(interrupt, async (signal) => {
-      let started = false;
-      for await (const event of agent.runConversationTurn(sessionId, userInput, { signal })) {
-        switch (event.kind) {
-          case "text_start":
-            started = true;
-            output.write("\n");
-            break;
-          case "text_delta":
-            output.write(event.content);
-            break;
-          case "text_end":
-            output.write("\n");
-            break;
-          case "tool_execution_start":
-            output.write(`  Running ${event.name}...`);
-            break;
-          case "tool_execution_end":
-            if (event.error) {
-              output.write(` ❌ ${event.result.slice(0, 100)}\n`);
-            } else {
-              output.write(` ✅ (${event.result.length} chars)\n`);
-            }
-            break;
-          case "turn_complete":
-            completed = true;
-            if (!started) {
-              output.write("\n(No response)\n");
-            }
-            break;
-          case "turn_aborted":
-            failed = true;
-            output.write("Turn aborted.\n");
-            break;
-          case "turn_error":
-            failed = true;
-            output.write(`\nError: ${event.error}\n`);
-            break;
-        }
+    for await (const event of agent.runConversationTurn(sessionId, userInput, { signal: controller.signal })) {
+      renderer.handle(event);
+      if (event.kind === "turn_complete") {
+        completed = true;
       }
-    });
-  } finally {
-    // Restore readline after raw mode
-    if (interrupt.rawMode && process.stdin.isTTY) {
-      try {
-        process.stdin.setRawMode(false);
-      } catch {
-        // Already restored
+      if (event.kind === "turn_aborted" || event.kind === "turn_error") {
+        failed = true;
       }
     }
+  } finally {
+    renderer.finish();
+    // Blank line after agent output to separate from the next prompt.
+    terminal.writeLine("");
+    terminal.setBusy(undefined);
   }
   return { ok: completed && !failed };
 }
@@ -1553,11 +1566,15 @@ AegisProbe Chat Commands
   /exit                    Quit the chat session
   /clear                   Clear conversation history
   /help                    Show this help
+  /auto-approve            Enable auto-approve for all tools (lab mode)
+  /no-auto-approve         Revert to per-action approval prompts
 
   Chat & Tools:
   /shell <command>         Execute a shell command directly
   /tools                   List available security tools
   /tools --check           Check tool health
+  /tool [last|call-id]     Expand one folded tool call
+  /tools-view <mode>       compact | full tool output display
 
   Pentest:
   /pentest <target>        Send a target to the current agent thread
@@ -1576,13 +1593,21 @@ AegisProbe Chat Commands
   /agent-bg <role> <task>  Spawn in background
 
   Just type anything to chat with the agent.
-  Press Escape to interrupt a running response.
+  Type while the agent works and press Enter or Tab to queue a follow-up.
+  Press Escape to interrupt the running response.
 `);
 }
 
-async function chatLoop(agent: MainAgent, sessionId: string, rl: ReturnType<typeof createInterface>, projectRoot = process.cwd(), autoApprove?: { active: boolean }): Promise<void> {
+async function chatLoop(
+  agent: MainAgent,
+  sessionId: string,
+  terminal: PersistentChatTerminal,
+  toolTranscript: ToolTranscriptStore,
+  projectRoot = process.cwd(),
+  autoApprove?: { active: boolean }
+): Promise<void> {
   while (true) {
-    const line = await askLine(rl, aegisPrompt());
+    const line = await terminal.readLine("aegis / agent");
     const trimmed = line.trim();
     if (!trimmed) {
       if (!input.isTTY) {
@@ -1596,6 +1621,20 @@ async function chatLoop(agent: MainAgent, sessionId: string, rl: ReturnType<type
     if (trimmed === "/clear") {
       agent.clearConversation(sessionId);
       console.log("Conversation cleared.");
+      continue;
+    }
+    if (trimmed === "/auto-approve") {
+      if (autoApprove) {
+        autoApprove.active = true;
+        console.log("Auto-approve enabled — all tool actions will run without prompting. Type /no-auto-approve to revert.");
+      }
+      continue;
+    }
+    if (trimmed === "/no-auto-approve") {
+      if (autoApprove) {
+        autoApprove.active = false;
+        console.log("Auto-approve disabled — each tool action will prompt for approval again.");
+      }
       continue;
     }
     if (trimmed === "/help") {
@@ -1623,7 +1662,7 @@ async function chatLoop(agent: MainAgent, sessionId: string, rl: ReturnType<type
         console.log("Usage: /pentest <target>");
         continue;
       }
-      await runChatTurn(agent, sessionId, target, rl);
+      await runChatTurn(agent, sessionId, target, terminal, toolTranscript);
       continue;
     }
     if (trimmed === "/agents") {
@@ -1636,6 +1675,21 @@ async function chatLoop(agent: MainAgent, sessionId: string, rl: ReturnType<type
     }
     if (trimmed === "/tools --check") {
       printToolInventory(true, projectRoot);
+      continue;
+    }
+    if (trimmed === "/tool" || trimmed.startsWith("/tool ")) {
+      const identifier = trimmed.slice("/tool".length).trim() || "last";
+      terminal.writeBlock(toolTranscript.render(identifier));
+      continue;
+    }
+    if (trimmed.startsWith("/tools-view ")) {
+      const mode = trimmed.slice("/tools-view ".length).trim();
+      if (mode !== "compact" && mode !== "full") {
+        console.log("Usage: /tools-view <compact|full>");
+        continue;
+      }
+      toolTranscript.setMode(mode);
+      console.log(`Tool output view: ${mode}`);
       continue;
     }
     if (trimmed === "/runs") {
@@ -1758,7 +1812,7 @@ async function chatLoop(agent: MainAgent, sessionId: string, rl: ReturnType<type
       continue;
     }
     // ── General conversation turn (streaming with interrupt) ──
-    await runChatTurn(agent, sessionId, trimmed, rl);
+    await runChatTurn(agent, sessionId, trimmed, terminal, toolTranscript);
   }
 }
 
