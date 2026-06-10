@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "pnpm -r build",
+    "cyberagent": "node apps/cli/dist/index.js chat --yes",
     "dev": "pnpm --filter @aegisprobe/cli dev",
     "lab:smoke": "node scripts/agent-lab-smoke.mjs",
     "lab:smoke:s2-045": "node scripts/agent-lab-smoke.mjs --case vulhub-struts2-s2-045",
